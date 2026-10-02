@@ -26,7 +26,7 @@ const driverEntries = [
   "tsconfig.types.json",
 ] as const;
 
-const expectedDriverRepoUrl = "https://github.com/langgenius/mosoo-agent-driver.git";
+const expectedDriverRepoUrl = "https://github.com/FradSer/mosoo-agent-driver.git";
 
 function fail(message: string): never {
   throw new Error(`Driver submodule cutover smoke failed: ${message}`);

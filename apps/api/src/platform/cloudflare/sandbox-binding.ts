@@ -11,16 +11,21 @@ export const RUNTIME_SANDBOX_IMAGES = {
   "claude-agent-sdk": { binding: "SandboxClaude", profile: "claude" },
   "openai-runtime": { binding: "SandboxOpenAI", profile: "openai" },
   "acp-fallback": { binding: "SandboxOpenCode", profile: "opencode" },
-} as const satisfies Record<DriverRuntime, { binding: keyof ApiBindings; profile: string }>;
+} as const satisfies Record<
+  Exclude<DriverRuntime, "pi-acp">,
+  { binding: keyof ApiBindings; profile: string }
+>;
 
-export type SandboxBinding = "Sandbox" | (typeof RUNTIME_SANDBOX_IMAGES)[DriverRuntime]["binding"];
+export type SandboxBinding =
+  | "Sandbox"
+  | (typeof RUNTIME_SANDBOX_IMAGES)[keyof typeof RUNTIME_SANDBOX_IMAGES]["binding"];
 
 export function runtimeImagesEnabled(value: string | undefined): boolean {
   return value === "true";
 }
 
 export function sandboxBindingForRuntime(runtimeId: string): SandboxBinding {
-  if (!isSupportedDriverRuntime(runtimeId)) {
+  if (!isSupportedDriverRuntime(runtimeId) || runtimeId === "pi-acp") {
     throw new Error(`No Sandbox image for runtime: ${runtimeId}.`);
   }
   return RUNTIME_SANDBOX_IMAGES[runtimeId].binding;

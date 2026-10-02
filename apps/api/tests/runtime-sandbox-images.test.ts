@@ -83,16 +83,25 @@ function database(): SqliteD1Database {
 }
 
 describe("runtime-specific Sandbox images", () => {
-  test("covers the product catalog and the pinned Driver image manifest exactly", () => {
+  test("covers the product catalog while keeping Driver-only Pi outside product images", () => {
     const images = JSON.parse(
       readFileSync(new URL("../../driver/runtime-images.json", import.meta.url), "utf8"),
     ) as { runtimeId: string; profile: string }[];
+    expect(images.filter((image) => image.runtimeId === "pi-acp")).toEqual([
+      expect.objectContaining({ runtimeId: "pi-acp", profile: "pi" }),
+    ]);
     expect(profiles.map(([runtimeId]) => runtimeId).toSorted()).toEqual(
       PUBLIC_RUNTIME_CATALOG.map((runtime) => runtime.runtimeId).toSorted(),
     );
     expect(
       Object.fromEntries(profiles.map(([runtimeId, , profile]) => [runtimeId, profile])),
-    ).toEqual(Object.fromEntries(images.map((image) => [image.runtimeId, image.profile])));
+    ).toEqual(
+      Object.fromEntries(
+        images
+          .filter((image) => image.runtimeId !== "pi-acp")
+          .map((image) => [image.runtimeId, image.profile]),
+      ),
+    );
   });
 
   test("keeps the pinned Sandbox image on the Worker SDK version", () => {

@@ -3,4 +3,4 @@
 	url = https://github.com/langgenius/mosoo-skills.git
 [submodule "apps/driver"]
 	path = apps/driver
-	url = https://github.com/langgenius/mosoo-agent-driver.git
+	url = https://github.com/FradSer/mosoo-agent-driver.git
