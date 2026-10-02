@@ -2,7 +2,7 @@
 
 This draft updates the Driver gitlink to the Pi v1.0.0 contribution on the protocol-6 revision already pinned by Mosoo. Pi is pinned to 1.0.0 and pi-acp to 0.0.34 in dependency locks, image manifests, fixtures and image admission checks.
 
-During review, `.gitmodules` points to the public contributor fork so clean checkouts can fetch the exact contribution. Restore the canonical upstream URL and pin its merged commit after the Driver contribution is accepted. The submodule smoke check uses the same URL. The Driver contribution is [draft PR #130](https://github.com/langgenius/mosoo-agent-driver/pull/130).
+The Driver submodule retains its canonical upstream URL, `https://github.com/langgenius/mosoo-agent-driver.git`. The submodule smoke check enforces that URL. Before merging, reconcile the Driver contribution with upstream and pin the accepted commit. The Driver contribution is [draft PR #130](https://github.com/langgenius/mosoo-agent-driver/pull/130).
 
 ## Acceptance and evidence
 
