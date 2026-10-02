@@ -107,10 +107,6 @@ export async function upsertNativeResumeRef(
   database: D1Database,
   observation: NativeResumeRefObservation,
 ): Promise<void> {
-  if (observation.nativeResumeRef.runtimeId === "pi-acp") {
-    throw new Error("Pi runtime is not enabled in the product catalog.");
-  }
-
   enforceNativeRuntimeRefShape(observation.nativeResumeRef);
 
   const timestampMs = currentTimestampMs();

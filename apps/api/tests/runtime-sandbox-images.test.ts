@@ -83,7 +83,7 @@ function database(): SqliteD1Database {
 }
 
 describe("runtime-specific Sandbox images", () => {
-  test("covers the product catalog while keeping Driver-only Pi outside product images", () => {
+  test("covers every public runtime with its Cloudflare Sandbox image", () => {
     const images = JSON.parse(
       readFileSync(new URL("../../driver/runtime-images.json", import.meta.url), "utf8"),
     ) as { runtimeId: string; profile: string }[];
@@ -95,13 +95,7 @@ describe("runtime-specific Sandbox images", () => {
     );
     expect(
       Object.fromEntries(profiles.map(([runtimeId, , profile]) => [runtimeId, profile])),
-    ).toEqual(
-      Object.fromEntries(
-        images
-          .filter((image) => image.runtimeId !== "pi-acp")
-          .map((image) => [image.runtimeId, image.profile]),
-      ),
-    );
+    ).toEqual(Object.fromEntries(images.map((image) => [image.runtimeId, image.profile])));
   });
 
   test("keeps the pinned Sandbox image on the Worker SDK version", () => {

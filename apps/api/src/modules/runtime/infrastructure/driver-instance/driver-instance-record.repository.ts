@@ -53,10 +53,6 @@ export async function createDriverInstanceRecord(
     mcpGrants?: DriverInstanceMcpGrantRecord[];
   },
 ): Promise<CreateDriverInstanceRecordResult> {
-  if (input.runtime === "pi-acp") {
-    throw new Error("Pi runtime is not enabled in the product catalog.");
-  }
-
   const now = currentTimestampMs();
   const bootTokenExpiresAt = now + DRIVER_BOOT_TOKEN_TTL_MS;
   const mcpGrantRows = (input.mcpGrants ?? []).map((grant) => ({

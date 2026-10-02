@@ -1,23 +1,69 @@
-# Pi v1.0.0 Driver integration draft
+# Pi v1.0.0 runtime integration draft
 
-This draft updates the Driver gitlink to the Pi v1.0.0 contribution on the protocol-6 revision already pinned by Mosoo. Pi is pinned to 1.0.0 and pi-acp to 0.0.34 in dependency locks, image manifests, fixtures and image admission checks.
+Pi uses `pi-acp` 0.0.34 and Pi 1.0.0 on the protocol-6 Driver pinned by
+Mosoo. The Driver submodule keeps the canonical upstream URL,
+`https://github.com/langgenius/mosoo-agent-driver.git`; the contribution is
+[draft PR #130](https://github.com/langgenius/mosoo-agent-driver/pull/130).
 
-The Driver submodule retains its canonical upstream URL, `https://github.com/langgenius/mosoo-agent-driver.git`. The submodule smoke check enforces that URL. Before merging, reconcile the Driver contribution with upstream and pin the accepted commit. The Driver contribution is [draft PR #130](https://github.com/langgenius/mosoo-agent-driver/pull/130).
+## Product contract
 
-## Acceptance and evidence
+Pi is a public runtime backed by a Project's OpenAI-compatible credential and
+an explicitly selected model. The raw credential remains in the control plane;
+provisioning issues a model-, Driver- and generation-bound Chat Completions
+grant. The existing Agent editor and public API use the generated runtime
+catalog. Existing default selection for custom credentials remains OpenCode
+with the credential's declared model; selecting Pi is explicit.
 
-Given the current exact package pair, initialization, frozen model selection, cancellation and native restoration must pass. Given a native session created by Pi 0.99.2, upgrading to 1.0.0 must preserve conversation history, real shell tools and refreshed instructions without loading hostile resources. Given the packed Driver running in its production image, real requests through Mosoo's proxy must support file write/read, usage and native cold continuation.
+Pi accepts text input, full access and unrestricted built-in tools. It does not
+support MCP servers, supervised tool approval or additional directories. The
+catalog declares these capability limits, readiness blocks enabled MCP
+bindings, and execution admission rejects unsupported configuration before
+launch. Advanced provider options remain empty in product configuration.
 
-The isolated source passed 1,352 Linux tests with 45 skips and zero failures, six real current-package contracts, 20 migration assertions, 24 packed MCP assertions and 49 host proxy/environment tests. Both production image profiles passed actual native tool execution; four real provider requests through the latest Mosoo proxy returned HTTP 200 and cold continuation retained conversation memory. The relocated contribution is byte-identical except for documentation; the PR describes additional checkout verification and any full-workspace gate limitations.
+Each Session owns its Cloudflare Sandbox and checkpointed runtime home. Both
+`pi-acp/.pi/agent/sessions` and `pi-acp/.pi/pi-acp/session-map.json` live below
+that home and are included in the existing complete workspace checkpoint.
+Native references are persisted with the `acp_session_id` kind; a supplied
+reference requires native restoration and cannot fall back to transcript replay.
+Never share writable Pi homes between Sessions.
 
-Relocated checkout verification: frozen install passed without lockfile changes, submodule smoke passed, API typecheck passed, and 36 focused host integration tests passed. The three new Pi admission regressions failed before the guards and passed afterward. Sandbox selection, Driver record creation and native-ref persistence reject Driver-only Pi before accessing storage; this retains existing DB enums without introducing migrations or pretending product provisioning exists. Current package contracts on macOS passed three tests with four Linux/migration skips.
+## Infrastructure and rollout
 
-Driver artifact SHA-256: `f8eb724f333369b23317674c07f82940a1aca3634e237e810eb2fd985369671c`.
+Infrastructure uses `cloudflare/sandbox:0.12.6` pinned by digest, matching the
+Worker's `@cloudflare/sandbox` 0.12.6 SDK. `SandboxPi` extends the existing
+Cloudflare wrapper. Local, staging and production configurations build its
+`RUNTIME=pi` image; `v4-pi-runtime` appends the new Durable Object class without
+rewriting prior migrations. The existing runtime-image rollout switch controls
+new allocations. The compatibility `all` image also includes Pi.
 
-## Scope
+Database columns remain SQLite TEXT. The TypeScript runtime unions are
+extended; `just db-generate pi-runtime` confirms there is no SQL schema change.
+Existing migrations and GraphQL outputs are unchanged. Runtime catalog outputs
+are regenerated from their authored JSONC source.
 
-Infrastructure must use Cloudflare Sandbox. The Driver runtime image retains `cloudflare/sandbox:0.12.6` pinned by digest, matching Mosoo's `@cloudflare/sandbox` 0.12.6 SDK. Existing Sandbox Durable Object classes and bindings remain in place. The separate Bun build stage only supplies the pinned executable and does not replace the runtime base.
+Latest Driver main has a separate protocol-3 SDK refactor that conflicts with
+Mosoo's protocol-6 host. This draft must reconcile that contribution before
+merge; a green package or image test does not establish upstream mergeability.
+No cloud deployment or existing customer-state migration is performed here.
 
-This is a Driver-level integration. It retains the existing protocol-6 contract and limits Pi to the managed OpenAI-compatible proxy, full access, text input, no Pi MCP and no additional directories. It does not add product runtime/model catalog entries, UI controls, production image provisioning or deployment. Real proxy E2E uses temporary SQLite/D1 fixtures, not production control-plane storage.
+## Acceptance and verification
 
-See [Driver integration details](../apps/driver/docs/pi-acp.md) and [Driver validation evidence](../apps/driver/docs/validation-protocol6.md). No GraphQL outputs or DB migrations change. The root lockfile is updated for the changed workspace dependencies.
+Given an explicitly selected Pi runtime, provisioning must select its
+Cloudflare binding, issue a Chat Completions grant, retain the checkpointed
+Session home and omit unsupported additional directories. Given MCP bindings
+or supervised/tool restrictions, readiness or execution admission must fail
+before launch. Given observed native state, the product repositories must
+persist the Pi Driver and ACP cursor, committing continuation only through the
+existing successful-checkpoint flow.
+
+Given Pi 0.99.2 native state, Pi 1.0.0 must restore conversation history, real
+shell tools and refreshed instructions. Given a production image and real
+provider through the Mosoo proxy, file write/read, usage and cold continuation
+must succeed without persisting the grant. Run the existing
+[public API runtime E2E case](../e2e/README.md#pi-v1-runtime) for the complete
+non-production control-plane path.
+
+See [Driver details](../apps/driver/docs/pi-acp.md) and
+[Driver validation](../apps/driver/docs/validation-protocol6.md). Validation
+results in the PR distinguish local Worker, Linux/image and real provider
+checks from deployed Cloudflare acceptance.
