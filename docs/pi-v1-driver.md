@@ -16,6 +16,8 @@ Driver artifact SHA-256: `f8eb724f333369b23317674c07f82940a1aca3634e237e810eb2fd
 
 ## Scope
 
+Infrastructure must use Cloudflare Sandbox. The Driver runtime image retains `cloudflare/sandbox:0.12.6` pinned by digest, matching Mosoo's `@cloudflare/sandbox` 0.12.6 SDK. Existing Sandbox Durable Object classes and bindings remain in place. The separate Bun build stage only supplies the pinned executable and does not replace the runtime base.
+
 This is a Driver-level integration. It retains the existing protocol-6 contract and limits Pi to the managed OpenAI-compatible proxy, full access, text input, no Pi MCP and no additional directories. It does not add product runtime/model catalog entries, UI controls, production image provisioning or deployment. Real proxy E2E uses temporary SQLite/D1 fixtures, not production control-plane storage.
 
 See [Driver integration details](../apps/driver/docs/pi-acp.md) and [Driver validation evidence](../apps/driver/docs/validation-protocol6.md). No GraphQL outputs or DB migrations change. The root lockfile is updated for the changed workspace dependencies.
