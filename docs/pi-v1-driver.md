@@ -29,8 +29,8 @@ Never share writable Pi homes between Sessions.
 
 ## Infrastructure and rollout
 
-Infrastructure uses `cloudflare/sandbox:0.12.6` pinned by digest, matching the
-Worker's `@cloudflare/sandbox` 0.12.6 SDK. `SandboxPi` extends the existing
+Infrastructure uses `cloudflare/sandbox:0.12.9` pinned by digest, matching the
+Worker's `@cloudflare/sandbox` 0.12.9 SDK. `SandboxPi` extends the existing
 Cloudflare wrapper. Local, staging and production configurations build its
 `RUNTIME=pi` image; `v4-pi-runtime` appends the new Durable Object class without
 rewriting prior migrations. The existing runtime-image rollout switch controls
