@@ -335,7 +335,7 @@ function buildLlmProxyUpstreamHeaders(incoming: Headers, target: RuntimeLlmProxy
     // Driver or a sandbox-supplied header. The raw provider key stays in Host.
     if (target.sessionId === undefined)
       throw new RuntimeLlmProxyError("Go session is unavailable.", 403);
-    headers.set("User-Agent", "mosoo/1.0");
+    headers.set("User-Agent", target.userAgent);
     headers.set("x-opencode-session", target.sessionId);
     if (target.modelProtocol === "anthropic-messages" && !headers.has("anthropic-version")) {
       headers.set("anthropic-version", "2023-06-01");

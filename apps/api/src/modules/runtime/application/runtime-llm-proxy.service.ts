@@ -4,6 +4,7 @@ import { getVendor } from "@mosoo/runtime-catalog";
 import type { RuntimeCatalogVendor } from "@mosoo/runtime-catalog";
 
 import type { ApiBindings } from "../../../platform/cloudflare/worker-types";
+import { getWorkerUserAgent } from "../../../platform/cloudflare/worker-user-agent";
 import { isTruthy } from "../../../shared/truthiness";
 import { readSecret } from "../../vault/application/vault-secret-store";
 import { getProjectCredentialRow } from "../../vendor-credentials/application/vendor-credential.repository";
@@ -19,6 +20,7 @@ import {
  */
 export interface RuntimeLlmProxyTarget {
   apiKey: string;
+  userAgent: string;
   sessionId?: SessionId;
   modelProtocol: PresetModelProtocol;
   upstreamBaseUrl: string;
@@ -104,6 +106,7 @@ export async function resolveRuntimeLlmProxyTarget(
 
   return {
     ...(sessionId === undefined ? {} : { sessionId }),
+    userAgent: getWorkerUserAgent(bindings.CF_VERSION_METADATA),
     apiKey: await readSecret(bindings.DB, bindings, credential.apiKeySecretId),
     modelProtocol: input.modelProtocol,
     upstreamBaseUrl,

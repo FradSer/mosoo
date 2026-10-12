@@ -289,13 +289,14 @@ test("Given a Go key, When testing a model, Then the probe identifies Mosoo and 
       apiKey: "probe-key",
       modelId: "minimax-m2.7",
       vendorId: "opencode-go",
+      versionMetadata: { id: "go-probe-release" },
       verifyModelProtocol: true,
     });
     expect(result.ok).toBe(true);
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toBe("https://opencode.ai/zen/go/v1/messages");
     expect(requests[0].headers.get("authorization")).toBe("Bearer probe-key");
-    expect(requests[0].headers.get("user-agent")).toBe("mosoo/1.0");
+    expect(requests[0].headers.get("user-agent")).toBe("mosoo/go-probe-release");
     expect(requests[0].headers.get("x-opencode-session")).toMatch(/^[a-f0-9-]{36}$/);
     expect(requests[0].headers.get("anthropic-version")).toBe("2023-06-01");
     expect(requests[0].headers.has("x-api-key")).toBe(false);

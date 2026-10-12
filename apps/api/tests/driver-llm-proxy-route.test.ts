@@ -3,16 +3,18 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { PresetModelProtocol } from "@mosoo/contracts/models";
 import { driverInstancesTable, vendorCredentialsTable } from "@mosoo/db";
 import { parsePlatformId } from "@mosoo/id";
-import type { DriverInstanceId, ProjectId, VendorCredentialId } from "@mosoo/id";
+import type { AccountId, DriverInstanceId, ProjectId, VendorCredentialId } from "@mosoo/id";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { registerDriverRoute } from "../src/adapters/http/routes/driver-route";
+import { getAccountViewer } from "../src/modules/auth/application/viewer-auth.service";
 import { getRuntimeDriverLlmProxyPath } from "../src/modules/runtime/domain/runtime-driver-routes";
 import { createRuntimeActionToken } from "../src/modules/runtime/infrastructure/runtime-boot-token";
 import type { RuntimeActionTokenPayload } from "../src/modules/runtime/infrastructure/runtime-boot-token";
 import { buildVendorProxyEnvVars } from "../src/modules/runtime/infrastructure/runtime-sandbox-provisioning/runtime-vendor-proxy-env.builder";
 import { storeSecret } from "../src/modules/vault/application/vault-secret-store";
+import { testVendorCredential } from "../src/modules/vendor-credentials/application/vendor-credential-test";
 import { runWithRequestLogContext } from "../src/platform/cloudflare/logger";
 import type { ApiBindings, ApiGatewayEnvironment } from "../src/platform/cloudflare/worker-types";
 import {
@@ -1225,9 +1227,11 @@ describe("OpenCode Go subscription routing", () => {
     "Given Go %s, When the Driver is replaced, Then proxy auth and conversation identity stay stable",
     async (modelProtocol, path, modelId) => {
       const { bindings, database } = await setupFixture({ vendorId: "opencode-go" });
+      bindings.CF_VERSION_METADATA = { id: "go-release-a", tag: "", timestamp: "" };
       const captured = captureUpstreamFetch();
       for (const driverInstanceId of [DRIVER_INSTANCE_ID, OTHER_DRIVER_INSTANCE_ID]) {
         if (driverInstanceId === OTHER_DRIVER_INSTANCE_ID) {
+          bindings.CF_VERSION_METADATA = { id: "go-release-b", tag: "", timestamp: "" };
           await database
             .app()
             .update(driverInstancesTable)
@@ -1258,7 +1262,7 @@ describe("OpenCode Go subscription routing", () => {
         const upstream = captured.at(-1)!;
         expect(upstream.url).toBe(`https://opencode.ai/zen/go/v1${path}`);
         expect(upstream.headers.get("authorization")).toBe(`Bearer ${UPSTREAM_API_KEY}`);
-        expect(upstream.headers.get("user-agent")).toBe("mosoo/1.0");
+        expect(upstream.headers.get("user-agent")).toBe(`mosoo/${bindings.CF_VERSION_METADATA.id}`);
         expect(upstream.headers.get("x-opencode-session")).toBe(PUBLIC_API_TEST_IDS.ownerSession);
         expect(upstream.headers.get("x-api-key")).toBeNull();
         expect(JSON.stringify([...upstream.headers])).not.toContain(grant);
@@ -1299,6 +1303,7 @@ test.each([
   "Given Go %s, When real OpenCode and Pi call a tool, Then the Host uses the Go wire contract",
   async (modelProtocol, path, modelId) => {
     const { bindings } = await setupFixture({ vendorId: "opencode-go" });
+    bindings.CF_VERSION_METADATA = { id: "go-cli-release", tag: "", timestamp: "" };
     for (const runtimeId of ["acp-fallback", "pi"] as const) {
       let calls = 0;
       const captured = captureUpstreamFetch(() =>
@@ -1347,7 +1352,9 @@ test.each([
           }
           expect(request.headers.get("authorization")).toBe(`Bearer ${UPSTREAM_API_KEY}`);
           expect(request.headers.get("x-api-key")).toBeNull();
-          expect(request.headers.get("user-agent")).toBe("mosoo/1.0");
+          expect(request.headers.get("user-agent")).toBe(
+            `mosoo/${bindings.CF_VERSION_METADATA.id}`,
+          );
           expect(request.headers.get("x-opencode-session")).toBe(PUBLIC_API_TEST_IDS.ownerSession);
           const grant = env[runtimeId === "pi" ? "MOSOO_PI_PROXY_GRANT" : "OPENCODE_GO_API_KEY"];
           expect(JSON.stringify([...request.headers])).not.toContain(grant);
@@ -1360,3 +1367,22 @@ test.each([
   },
   60_000,
 );
+
+test("Given Host version metadata, When testing a Go credential, Then the probe uses that deployment", async () => {
+  const { bindings } = await setupFixture({ vendorId: "opencode-go" });
+  bindings.CF_VERSION_METADATA = { id: "go-host-probe", tag: "", timestamp: "" };
+  const viewer = await getAccountViewer(bindings.DB, PUBLIC_API_TEST_IDS.ownerAccount as AccountId);
+  if (viewer === null) throw new Error("Missing fixture viewer");
+  const captured = captureUpstreamFetch(() =>
+    Response.json({ choices: [{ message: { content: "pong" } }] }),
+  );
+  const result = await testVendorCredential(bindings, viewer, {
+    projectId: PROJECT_ID,
+    apiKey: "probe-key",
+    modelId: "deepseek-v4-flash",
+    vendorId: "opencode-go",
+  });
+  expect(result.ok).toBe(true);
+  expect(captured).toHaveLength(1);
+  expect(captured[0]?.headers.get("user-agent")).toBe("mosoo/go-host-probe");
+});

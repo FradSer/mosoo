@@ -10,7 +10,7 @@ Which runtimes and models a Project can run, and how providers and model protoco
 - OpenCode and Pi accept all four protocols, OpenAI Runtime only Responses, and Claude Agent SDK only Anthropic Messages for Anthropic models. A runtime and protocol pair that does not match is rejected before any execution.
 - Custom providers are `openai-compatible` in the API. When a Project's only usable keys are custom, a new Agent in the console defaults to OpenCode; Pi or OpenAI Runtime runs custom models only when chosen explicitly. Pi's default is an incomplete placeholder until a preset model or a model declared on a custom credential is selected.
 - OpenCode Go is a separate provider from OpenCode Zen. Add a Go API key in Providers and select a Go model with OpenCode or Pi. The catalog contains a curated model list with each model's protocol; [OpenCode's Go documentation](https://opencode.ai/docs/go/) defines the upstream endpoints and subscription limits. Mosoo does not sell or manage the subscription.
-- Go requests identify Mosoo and use the Host Session ID for routing and caching, including after Driver replacement. Manual credential tests use a separate temporary conversation ID. Provider keys stay behind the Host proxy.
+- Go requests identify Mosoo with the current Cloudflare Worker version ID (`mosoo/dev` for local callers without deployment metadata) and use the Host Session ID for routing and caching, including after Driver replacement. Manual credential tests use a separate temporary conversation ID. Provider keys stay behind the Host proxy.
 - Publishing does not lock an Agent's runtime or model.
 
 ## Limits
