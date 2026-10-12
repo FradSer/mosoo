@@ -25,6 +25,15 @@ export function toVendorProbeAuthHeaders(
   apiKey: string,
   modelProtocol?: PresetModelProtocol | null,
 ): Record<string, string> {
+  if (vendor.vendorId === "opencode-go") {
+    return {
+      Authorization: `Bearer ${apiKey}`,
+      "User-Agent": "mosoo/1.0",
+      // A manual credential probe is its own short-lived conversation.
+      "x-opencode-session": crypto.randomUUID(),
+      ...(modelProtocol === "anthropic-messages" ? { "anthropic-version": "2023-06-01" } : {}),
+    };
+  }
   if (vendor.vendorId === "openai-compatible") {
     if (modelProtocol === "anthropic-messages") {
       return { "anthropic-version": "2023-06-01", "x-api-key": apiKey };

@@ -1,5 +1,5 @@
 import type { PresetModelProtocol } from "@mosoo/contracts/models";
-import type { DriverInstanceId, ProjectId, VendorCredentialId } from "@mosoo/id";
+import type { DriverInstanceId, ProjectId, SessionId, VendorCredentialId } from "@mosoo/id";
 import { getVendor } from "@mosoo/runtime-catalog";
 import type { RuntimeCatalogVendor } from "@mosoo/runtime-catalog";
 
@@ -7,7 +7,10 @@ import type { ApiBindings } from "../../../platform/cloudflare/worker-types";
 import { isTruthy } from "../../../shared/truthiness";
 import { readSecret } from "../../vault/application/vault-secret-store";
 import { getProjectCredentialRow } from "../../vendor-credentials/application/vendor-credential.repository";
-import { isDriverInstanceGenerationActive } from "../infrastructure/driver-instance/driver-instance-record.repository";
+import {
+  getDriverInstanceRecord,
+  isDriverInstanceGenerationActive,
+} from "../infrastructure/driver-instance/driver-instance-record.repository";
 
 /**
  * Upstream target for one proxied model call. `apiKey` is the raw vendor
@@ -16,6 +19,7 @@ import { isDriverInstanceGenerationActive } from "../infrastructure/driver-insta
  */
 export interface RuntimeLlmProxyTarget {
   apiKey: string;
+  sessionId?: SessionId;
   modelProtocol: PresetModelProtocol;
   upstreamBaseUrl: string;
   vendor: RuntimeCatalogVendor;
@@ -52,6 +56,7 @@ export async function resolveRuntimeLlmProxyTarget(
   bindings: ApiBindings,
   input: {
     credentialId: VendorCredentialId;
+    driverInstanceId: DriverInstanceId;
     modelProtocol: PresetModelProtocol;
     projectId: ProjectId;
   },
@@ -90,7 +95,15 @@ export async function resolveRuntimeLlmProxyTarget(
     throw new RuntimeLlmProxyError("Vendor upstream endpoint is not configured.", 502);
   }
 
+  let sessionId: SessionId | undefined;
+  if (vendor.vendorId === "opencode-go") {
+    const driver = await getDriverInstanceRecord(bindings.DB, input.driverInstanceId);
+    if (driver === null) throw new RuntimeLlmProxyError("Driver session is unavailable.", 403);
+    sessionId = driver.sandboxSessionId;
+  }
+
   return {
+    ...(sessionId === undefined ? {} : { sessionId }),
     apiKey: await readSecret(bindings.DB, bindings, credential.apiKeySecretId),
     modelProtocol: input.modelProtocol,
     upstreamBaseUrl,
