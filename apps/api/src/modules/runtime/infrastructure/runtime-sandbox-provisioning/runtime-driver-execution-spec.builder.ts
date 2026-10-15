@@ -26,8 +26,8 @@ import {
 import type { DriverInstanceMcpGrantRecord } from "../driver-instance/mcp-grants.repository";
 import { createRuntimeActionToken } from "../runtime-boot-token";
 import type { RuntimeActionTokenBindings } from "../runtime-boot-token";
+import { buildModelConnection } from "./runtime-model-connection.builder";
 import { listAdditionalDirectories } from "./runtime-sandbox-provisioning.paths";
-import { buildVendorProxyEnvVars } from "./runtime-vendor-proxy-env.builder";
 
 interface RuntimeActionUrlContext {
   bindings: RuntimeExecutionSpecBindings;
@@ -149,7 +149,6 @@ export async function buildExecutionSpec(
   bindings: RuntimeExecutionSpecBindings,
   input: {
     builtInTools: DriverExecutionSpec["builtInTools"];
-    driverGeneration: number;
     driverInstanceId: DriverInstanceId;
     profile: DriverProfileConfig;
     requestUrl: string;
@@ -167,16 +166,15 @@ export async function buildExecutionSpec(
     driverInstanceId: input.driverInstanceId,
     requestUrl: input.requestUrl,
   };
-  const [mcpServers, skills, vendorProxyEnvVars] = await Promise.all([
+  const [mcpServers, skills, modelConnection] = await Promise.all([
     Promise.all(
       input.resolvedMcpServers.map(async (server) => withRuntimeMcpProxy(actionUrlContext, server)),
     ),
     Promise.all(
       input.resolvedSkills.map(async (skill) => toRuntimeResolvedSkill(actionUrlContext, skill)),
     ),
-    buildVendorProxyEnvVars({
+    buildModelConnection({
       bindings,
-      driverGeneration: input.driverGeneration,
       driverInstanceId: input.driverInstanceId,
       profile: input.profile,
       requestUrl: input.requestUrl,
@@ -195,12 +193,10 @@ export async function buildExecutionSpec(
         node: [],
         python: [],
       },
-      variables: {
-        ...input.profile.envVars,
-        ...vendorProxyEnvVars,
-      },
+      variables: input.profile.envVars,
     },
     model: input.profile.model,
+    modelConnection,
     permissionPolicy: "full_access",
     profilePrompt: appendRuntimeArtifactContextToPrompt(input.profile.prompt),
     provider: input.profile.provider,

@@ -55,9 +55,11 @@ flowchart LR
 - **Auth** is Better Auth: Email OTP, plus Google when its OAuth secrets are set; no passwords, one account per email. The OTP-free development login for `@mosoo.ai` addresses is registered only when `WEB_ORIGIN` is a loopback origin. The CLI device flow (`/api/auth/cli/{start,confirm,token}` with the console's `/cli-auth` page) is a cross-repository contract with the CLI.
 - **Principals:** a browser session or a CLI login token (`mcli_`) acts as the account; a Project key (`msp_`) acts as the account inside one Project. Account-only operations, including key management, reject Project keys. For Project keys, Public API rate limits and idempotency are keyed by the Project, so rotating a key neither resets them nor repeats work; each Run records `created_by_key_id`.
 - **Secrets:** provider keys, MCP credentials and Environment secrets are envelope-encrypted in `vault_secret` under `VAULT_ROOT_SECRET`; API keys are stored only as SHA-256 hashes. Credentials resolve inside the Session's Project and fail closed.
-- **Raw provider keys never enter a Sandbox.** The Driver gets an expiring grant bound to one credential, model, model protocol and Driver generation, and calls the Worker's LLM proxy (`/api/driver/llm/proxy/:credentialId/*`), which reads the vault on each request and adds the upstream auth. Environment variables cannot override the vendor variables mosoo sets for that proxy.
-- **MCP** traffic goes through the Worker's MCP proxy, which holds the upstream credential and adds a delegation token carrying the end-user `userId` only when the Session has one.
+- **Raw provider keys never enter a Sandbox.** The Driver gets an expiring grant bound to one credential, model, model protocol and Driver instance, and calls the Worker's LLM proxy (`/api/driver/llm/proxy/:credentialId/*`), which reads the vault on each request and adds the upstream auth. Environment variables cannot override the vendor variables mosoo sets for that proxy.
+- **MCP** traffic goes through the Worker's MCP proxy, which checks the grant's Driver instance is active before reading the upstream credential or creating delegation context.
+  It adds a delegation token carrying the end-user `userId` only when the Session has one.
 - **Model protocol:** one protocol is resolved from the preset provider/model or from the custom credential's declared protocol, checked against the runtime, and frozen into the Session plan. Continuation fails if the credential's protocol later changes.
+  The Host supplies the typed model connection and protocol; each Driver adapter renders its native configuration from the frozen execution, with Pi preserving metadata from its installed model catalog.
 - **Network:** an Environment is `full` (container defaults) or `limited`: no direct internet, and a deny-by-default HTTP(S) allowlist of the Environment's hosts, the API control origin and the R2 endpoint, checked on every outbound request including each redirect hop. The policy is applied before the container starts and is fixed for the subject's lifetime: a different policy fails closed. A `limited` Environment rejects proxy variables. Where `limited` cannot be enforced (local workerd), startup fails closed.
 
 ## 5. Runtime: subjects, Driver and checkpoints
@@ -77,6 +79,7 @@ flowchart LR
   Follow-up admission, idle reclamation and per-Session maintenance wait for that committed boundary.
   The instance completion RPC only confirms an already committed canonical completion; it cannot synthesize success.
 - **Event acknowledgments:** a receipt names the exact canonical event already stored in D1.
+  Retries preserve the event ID, timestamp and content from the first delivery attempt.
   A repeated source ID with identical content returns its original sequence before any bundle read; changed content or a competing terminal outcome returns a terminal conflict.
   Lost acknowledgments never require a cleaned-up local bundle to be recreated.
 - **Retention:** the latest committed checkpoint is kept while the Session exists (`SANDBOX_BACKUP_TTL_SECONDS`), survives archive, and is deleted with the Session.
@@ -84,6 +87,10 @@ flowchart LR
   Runtime restores that Run's exact ready backup into an isolated temporary directory, validates its selected native bundle and copies only that bundle into the current Session directory.
   Native extraction uses a separate archive and preserves every mount and backing file used by the current workspace.
   The provider rebuilds its native home from the bundle before starting a native process, including when the current workspace is nonempty.
+  Pi bundles its session records and native Bash and MCP output files from its `outputs` directory, preserving their original absolute paths across Sandbox replacement.
+  Bash subprocesses use a separate `tmp` directory so ordinary temporary files do not consume the native output budget.
+  Structured native output references must resolve inside `outputs`; ordinary tool text is never interpreted as file metadata.
+  The bundle manifest verifies every saved file's size and hash before restore.
   Existing workspace archive and restore behavior remains separate; the archive does not promise a transactional snapshot of user files, and native recovery does not roll those files back.
   There is no transcript replay, and `session_event` history is never a recovery input.
   A missing or failed native restore is an explicit error.
@@ -111,6 +118,9 @@ flowchart LR
 
 - **D1 schema** lives in `pkgs/db/src/schema`. Migrations are append-only: follow [CONTRIBUTING](../CONTRIBUTING.md#database-and-migrations).
 - **Events:** every Session event is written to `session_event` with a per-Session `seq`, deduplicated by its source event ID, before any live delivery. Live delivery is best effort; history reads and SSE streams serve the persisted record.
+  Viewer thinking recovery reads a bounded history window.
+  Snapshot delivery restarts its read if replay frames are discarded before it finishes.
+  Driver ingestion validates thought offsets, completion and byte totals from persisted metadata and the last content chunk, keeping full thought bodies out of its live state.
 - **Background work:** an `api_command` row is written to D1 before delivery (for Run dispatch, in the same batch as the Run). Queues deliver it at least once, consumers claim it idempotently, and the one-minute cron redrives commands that were never delivered or whose consumer stopped, then starts maintenance.
 - **Usage:** each model call writes a `session_model_call` row and its `usage_event` in one batch. A daily rollup folds `usage_event` rows older than `DETAIL_RETENTION_DAYS` into `usage_daily_rollup`. Costs are estimates from a recorded price snapshot (`pricing_status` may be `unknown`); there is no billing or settlement.
 - **Logs and traces:** Vestig structured logs and wide events, W3C `traceparent` across HTTP requests and the Driver socket, and Workers Logs and Traces in every environment. There is no blanket OpenTelemetry instrumentation.

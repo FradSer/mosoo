@@ -18,7 +18,7 @@ import type { ApiBindings } from "../../../../platform/cloudflare/worker-types";
 import { isTruthy } from "../../../../shared/truthiness";
 import {
   applyAgUiEventToSessionLiveState,
-  loadSessionViewerState,
+  loadSessionState,
   projectRuntimeEventToSessionDeliveryEvents,
 } from "../../../sessions/application/session-live-state.service";
 import type {
@@ -49,6 +49,7 @@ import {
   recordRuntimeFileChanges,
   recordRuntimeSessionOutputDirectory,
 } from "./runtime-session-output-store";
+import { validateThoughtEvents } from "./thought-event-validation";
 
 function readTerminalPendingToolResult(event: RuntimeEventEnvelope): string | null {
   if (event.kind === "run.failed") {
@@ -128,6 +129,18 @@ export async function projectRuntimeDriverEvents(
     throw new Error("Runtime driver run event is missing a session run id.");
   }
 
+  const events = input.events.map((envelope) => {
+    input.assertCurrentConnection();
+    const event = parseRuntimeEventEnvelope(envelope.event);
+    assertRuntimeEventMatchesDriverLink(event, {
+      driverInstanceId: input.driverInstanceId,
+      link,
+    });
+    assertRuntimeEventMatchesDriverEnvelope(event, { eventId: envelope.eventId });
+    return { envelope, event };
+  });
+  await validateThoughtEvents(database, { events: events.map(({ event }) => event), sessionId });
+
   const currentLiveState =
     input.currentLiveState ?? (await loadStoredRuntimeLiveState(database, link));
 
@@ -161,17 +174,16 @@ export async function projectRuntimeDriverEvents(
     });
   }
 
-  for (const envelope of input.events) {
+  for (const { envelope, event } of events) {
     input.assertCurrentConnection();
-    const event = parseRuntimeEventEnvelope(envelope.event);
-    assertRuntimeEventMatchesDriverLink(event, {
-      driverInstanceId: input.driverInstanceId,
-      link,
-    });
-    assertRuntimeEventMatchesDriverEnvelope(event, {
-      eventId: envelope.eventId,
-    });
     appendCanonicalEvent(envelope, event);
+
+    if (event.kind.startsWith("thought.")) {
+      for (const liveEvent of projectRuntimeEventToSessionDeliveryEvents(event)) {
+        appendSessionDeliveryEvent(envelope, liveEvent);
+      }
+      continue;
+    }
 
     if (event.kind === "runtime.resume.updated") {
       const nativeResumeRef = readNativeResumeRef(event);
@@ -406,7 +418,7 @@ async function loadStoredRuntimeLiveState(
     throw new Error("Runtime session link is missing a viewer principal.");
   }
 
-  return loadSessionViewerState(database, {
+  return loadSessionState(database, {
     sessionId: link.sessionId,
     viewerId,
   });

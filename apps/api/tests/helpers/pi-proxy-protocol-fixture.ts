@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { DriverModelConnection } from "@mosoo/agent-driver/boot";
 import type { PresetModelProtocol } from "@mosoo/contracts/models";
+
+import { buildOpenCodeModelConfig } from "../../../driver/src/runtimes/acp/acp-configuration";
+import { readPiModelConfiguration } from "../../../driver/src/runtimes/pi/pi-configuration";
+import { PI_MODEL_CONFIGURATION_SOURCE } from "../../../driver/src/runtimes/pi/pi-model-configuration";
 
 const piCli = fileURLToPath(
   new URL(
@@ -14,6 +19,7 @@ const piCli = fileURLToPath(
 );
 export const PI_PROXY_TOOL_PROOF = "pi-proxy-tool-proof";
 export const PI_PROXY_FINAL_TEXT = "Pi protocol round trip completed.";
+export const PI_PROXY_THOUGHT_SIGNATURE = "c2lnbmF0dXJlLW11c3Qtc3Vydml2ZQ==";
 const toolArguments = {
   command: `printf '${PI_PROXY_TOOL_PROOF}'`,
   description: "Print the protocol integration proof",
@@ -174,7 +180,12 @@ export function piProxyProtocolResponse(protocol: PresetModelProtocol, tool: boo
               content: {
                 role: "model",
                 parts: tool
-                  ? [{ functionCall: { name: "bash", args: toolArguments } }]
+                  ? [
+                      {
+                        functionCall: { name: "bash", args: toolArguments },
+                        thoughtSignature: PI_PROXY_THOUGHT_SIGNATURE,
+                      },
+                    ]
                   : [{ text: PI_PROXY_FINAL_TEXT }],
               },
               finishReason: "STOP",
@@ -187,16 +198,29 @@ export function piProxyProtocolResponse(protocol: PresetModelProtocol, tool: boo
   }
 }
 
+interface PiProxyModel {
+  provider: string;
+  model: string;
+  thinkingLevel?: string;
+}
+
 /** Real pinned Pi CLI, with all model traffic directed at the test's Host proxy. */
 export async function runPiProxyTurn(
-  variables: Record<string, string>,
+  modelConnection: DriverModelConnection,
+  input: PiProxyModel,
 ): Promise<Record<string, unknown>[]> {
+  const configuration = readPiModelConfiguration({
+    provider: input.provider,
+    model: input.model,
+    providerOptions:
+      input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel },
+    modelConnection,
+  });
+  const { provider, model, thinkingLevel } = configuration;
   const home = await mkdtemp(join(tmpdir(), "mosoo-pi-proxy-"));
   const agentDir = join(home, "pi");
   await mkdir(agentDir);
-  await writeFile(join(agentDir, "models.json"), variables["MOSOO_PI_CONFIG_CONTENT"] ?? "", {
-    mode: 0o600,
-  });
+  await writeFile(join(agentDir, "models.json"), "{}", { mode: 0o600 });
   await writeFile(
     join(agentDir, "settings.json"),
     JSON.stringify({
@@ -207,6 +231,11 @@ export async function runPiProxyTurn(
       promptTemplates: [],
     }),
   );
+  const extension = join(agentDir, "mosoo-model.mjs");
+  await writeFile(
+    extension,
+    `${PI_MODEL_CONFIGURATION_SOURCE}\nexport default function(pi) { configurePiModel(pi, ${JSON.stringify(configuration)}); }`,
+  );
   const child = spawn(
     "node",
     [
@@ -214,9 +243,12 @@ export async function runPiProxyTurn(
       "--mode",
       "rpc",
       "--provider",
-      "mosoo",
+      provider,
       "--model",
-      "pi-test",
+      model,
+      "--extension",
+      extension,
+      ...(thinkingLevel === undefined ? [] : ["--thinking", thinkingLevel]),
       "--offline",
       "--no-extensions",
       "--no-skills",
@@ -227,7 +259,7 @@ export async function runPiProxyTurn(
       cwd: home,
       env: {
         PATH: process.env["PATH"] ?? "",
-        ...variables,
+        MOSOO_MODEL_PROXY_GRANT: modelConnection.proxyGrant,
         HOME: home,
         PI_CODING_AGENT_DIR: agentDir,
         PI_OFFLINE: "1",
@@ -276,6 +308,7 @@ export async function runPiProxyTurn(
     25_000,
   );
   try {
+    child.stdin.write(`${JSON.stringify({ id: "test-state", type: "get_state" })}\n`);
     child.stdin.write(
       `${JSON.stringify({ id: "test-prompt", type: "prompt", message: "Run the provided bash tool and then finish." })}\n`,
     );
@@ -290,9 +323,9 @@ export async function runPiProxyTurn(
   }
 }
 
-/** Real pinned OpenCode CLI using Host-rendered provider configuration. */
+/** Real pinned OpenCode CLI using Driver-rendered provider configuration. */
 export async function runOpenCodeProxyTurn(
-  variables: Record<string, string>,
+  modelConnection: DriverModelConnection,
 ): Promise<Record<string, unknown>[]> {
   const home = await mkdtemp(join(tmpdir(), "mosoo-opencode-proxy-"));
   const executable = fileURLToPath(
@@ -316,7 +349,12 @@ export async function runOpenCodeProxyTurn(
       cwd: home,
       env: {
         PATH: process.env["PATH"] ?? "",
-        ...variables,
+        OPENCODE_API_KEY: modelConnection.proxyGrant,
+        OPENCODE_CONFIG_CONTENT: buildOpenCodeModelConfig({
+          model: "pi-test",
+          provider: "openai-compatible",
+          modelConnection,
+        }),
         HOME: home,
         OPENCODE_TEST_HOME: home,
         XDG_CACHE_HOME: join(home, ".cache"),
