@@ -63,7 +63,7 @@ const VENDOR_BY_PROVIDER: Readonly<Record<string, string>> = {
 // Retain the reviewed Mosoo rates for the preset absent from models.dev.
 const PRICING_OVERRIDES: ModelsDevPrices = {
   openai: {
-    "gpt-5.3": { input: 1.75, output: 14, cache_read: 0.175, cache_write: 2.1875 },
+    "gpt-5.3": { input: 1.75, output: 14, cache_read: 0.175 },
   },
 };
 

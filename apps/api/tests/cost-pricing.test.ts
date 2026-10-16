@@ -97,6 +97,8 @@ describe("cost pricing", () => {
     expect(
       catalog.findModelPricing({ providerId: "openai", modelId: "openai/gpt-5.3-latest" }),
     ).toMatchObject({
+      cacheReadUsdPerMillion: 0.175,
+      cacheWriteUsdPerMillion: 1.75,
       inputUsdPerMillion: 1.75,
       outputUsdPerMillion: 14,
       source: "mosoo_override",
@@ -111,6 +113,7 @@ describe("cost pricing", () => {
     ["openai", "gpt-5.4"],
     ["openai", "gpt-5.4-mini"],
     ["openai", "gpt-5.2"],
+    ["openai", "gpt-5.3"],
     ["kimi", "kimi-k2.6"],
     ["kimi", "kimi-k2.7-code"],
     ["minimax", "MiniMax-M3"],
