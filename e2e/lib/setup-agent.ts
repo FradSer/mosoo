@@ -28,26 +28,57 @@ export async function configurePreviewRuntimeModel(
   const preset = getPresetModel({ modelId: input.modelId, vendorId: input.providerId });
   if (preset === null) throw new Error("Preview E2E requires an admitted preset model.");
 
-  await page.goto(`/agent/${agentId}?tab=preview`);
+  const [loaded] = await Promise.all([
+    page.waitForResponse((response) => {
+      if (!response.url().endsWith("/api/graphql")) return false;
+      const request = response.request().postDataJSON() as {
+        query?: string;
+        variables?: { agentId?: string };
+      };
+      return (
+        /\bquery\s+Agent\s*\(/u.test(request.query ?? "") && request.variables?.agentId === agentId
+      );
+    }),
+    page.goto(`/agent/${agentId}?tab=preview`),
+  ]);
+  expect(loaded.ok()).toBe(true);
+  const initial = (await loaded.json()) as {
+    data?: { agent?: { id: string; model: string | null; provider: string | null } };
+    errors?: unknown[];
+  };
+  expect(initial.errors).toBeUndefined();
+  expect(initial.data?.agent).toMatchObject({ id: agentId });
   const modelField = page.getByText("Model", { exact: true }).locator("..");
   await modelField.getByRole("button").click();
   const option = page.getByRole("menuitem").filter({
     hasText: `${preset.vendorLabel} · ${preset.modelId}`,
   });
   await expect(option).toBeEnabled();
-  const saved = page.waitForResponse((response) => {
-    if (!response.url().endsWith("/api/graphql")) return false;
-    const request = response.request().postDataJSON() as {
-      query?: string;
-      variables?: { input?: { model?: string } };
-    };
-    return (
-      request.query?.includes("UpdateAgentConfig") === true &&
-      request.variables?.input?.model === input.modelId
-    );
-  });
-  await option.click();
-  const response = await saved;
+  if (
+    initial.data?.agent?.model === input.modelId &&
+    initial.data.agent.provider === input.providerId
+  ) {
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await expect(modelField.getByRole("button")).toContainText(preset.displayName);
+    return;
+  }
+  const [response] = await Promise.all([
+    page.waitForResponse((response) => {
+      if (!response.url().endsWith("/api/graphql")) return false;
+      const request = response.request().postDataJSON() as {
+        query?: string;
+        variables?: { input?: { agentId?: string; model?: string; provider?: string } };
+      };
+      return (
+        request.query?.includes("UpdateAgentConfig") === true &&
+        request.variables?.input?.agentId === agentId &&
+        request.variables.input.model === input.modelId &&
+        request.variables.input.provider === input.providerId
+      );
+    }),
+    option.click(),
+  ]);
   expect(response.ok()).toBe(true);
   expect(((await response.json()) as { errors?: unknown[] }).errors).toBeUndefined();
   await page.reload();
