@@ -4,9 +4,10 @@ import type { RuntimeEventId, SessionRunId } from "@mosoo/id";
 // per fragment so every accepted source identity stays durable (#274). Reading
 // them back verbatim renders each fragment as its own timeline entry, so read
 // paths fold a fragment stream into a single row before projecting process
-// events: deltas append, snapshots prefer the longer prefix-matching text.
+// events: message deltas append, snapshots prefer the longer prefix-matching
+// text; thoughts use canonical identity and offsets to replace previews.
 //
-// Rows carry no message identity, so a stream whose driver-side identity
+// Message folding groups by process type, so a stream whose driver-side identity
 // fractured (a dropped message_start splits one reply across several
 // started/delta groups, YEF-884) still folds into several fragment rows, and
 // the trailing message.added snapshot lands after its stream already closed.
@@ -23,7 +24,34 @@ export interface StreamFoldableSessionEventRow {
   process_type: string;
   run_id: SessionRunId | null;
   seq: number;
+  thought_id: string | null;
+  thought_offset: number | null;
   tokens: number | null;
+}
+
+export interface StoredThoughtEvent {
+  content: string;
+  offset: number | null;
+  thoughtId: string;
+}
+
+export function readStoredThoughtEvent(
+  row: Pick<
+    StreamFoldableSessionEventRow,
+    "content_text" | "event_type" | "thought_id" | "thought_offset"
+  >,
+): StoredThoughtEvent | null {
+  if (!row.event_type.startsWith("thought.") || row.thought_id === null) {
+    return null;
+  }
+  return {
+    content:
+      row.event_type === "thought.updated" || row.event_type === "thought.delta"
+        ? row.content_text
+        : "",
+    offset: row.thought_offset,
+    thoughtId: row.thought_id,
+  };
 }
 
 type StreamRowPhase = "added" | "completed" | "delta" | "started";
@@ -53,13 +81,23 @@ const terminalRunEventTypes = new Set(["run.cancelled", "run.completed", "run.fa
 
 interface OpenStreamGroup<R extends StreamFoldableSessionEventRow> {
   contentText: string;
+  firstRow: R | null;
+  lastRow: R | null;
   placeholder: string;
-  rows: R[];
   runId: SessionRunId | null;
 }
 
 interface ClosedFragmentSegment {
   content: string;
+  outputIndex: number;
+}
+
+interface ThoughtStreamGroup<R extends StreamFoldableSessionEventRow> {
+  anchor: R;
+  canonical: boolean;
+  closed: boolean;
+  content: string;
+  nextOffset: number | null;
   outputIndex: number;
 }
 
@@ -105,8 +143,9 @@ function createOpenStreamGroup<R extends StreamFoldableSessionEventRow>(
 ): OpenStreamGroup<R> {
   return {
     contentText: "",
+    firstRow: null,
+    lastRow: null,
     placeholder: classification.placeholder,
-    rows: [],
     runId: row.run_id,
   };
 }
@@ -116,7 +155,8 @@ function mergeStreamRow<R extends StreamFoldableSessionEventRow>(
   row: R,
   classification: StreamRowClassification,
 ): void {
-  group.rows.push(row);
+  group.firstRow ??= row;
+  group.lastRow = row;
 
   // Fragments that carried no text are persisted with the process-draft
   // placeholder; they mark stream boundaries and must not leak into the text.
@@ -133,10 +173,9 @@ function mergeStreamRow<R extends StreamFoldableSessionEventRow>(
 function createFoldedStreamRow<R extends StreamFoldableSessionEventRow>(
   group: OpenStreamGroup<R>,
 ): R | null {
-  const firstRow = group.rows[0];
-  const lastRow = group.rows[group.rows.length - 1];
+  const { firstRow, lastRow } = group;
 
-  if (firstRow === undefined || lastRow === undefined || group.contentText.length === 0) {
+  if (firstRow === null || lastRow === null || group.contentText.length === 0) {
     return null;
   }
 
@@ -148,12 +187,11 @@ function createFoldedStreamRow<R extends StreamFoldableSessionEventRow>(
   };
 }
 
-export function foldStreamedSessionEventRows<R extends StreamFoldableSessionEventRow>(
-  rows: readonly R[],
-): R[] {
+export function createStreamedSessionEventRowFolder<R extends StreamFoldableSessionEventRow>() {
   const output: (R | null)[] = [];
   const openGroups = new Map<string, OpenStreamGroup<R>>();
   const fragmentSegments = new Map<string, ClosedFragmentSegment[]>();
+  const thoughts = new Map<string, ThoughtStreamGroup<R>>();
 
   function closeGroupAsFragment(key: string, group: OpenStreamGroup<R>): void {
     const folded = createFoldedStreamRow(group);
@@ -207,71 +245,143 @@ export function foldStreamedSessionEventRows<R extends StreamFoldableSessionEven
     };
   }
 
-  for (const row of rows) {
-    const classification = streamRowClassifications[row.event_type];
+  function append(rows: readonly R[]): void {
+    for (const row of rows) {
+      const storedThought = readStoredThoughtEvent(row);
+      if (storedThought !== null) {
+        const key = JSON.stringify([row.run_id, storedThought.thoughtId]);
+        let thought = thoughts.get(key);
 
-    if (classification === undefined) {
-      // A terminal run receipt flushes the run's interrupted streams, exactly
-      // like the pre-persistence compactor did, so a failed run still shows
-      // the text it managed to stream.
-      if (terminalRunEventTypes.has(row.event_type)) {
-        for (const [key, group] of openGroups) {
-          if (group.runId === row.run_id) {
-            openGroups.delete(key);
-            closeGroupAsFragment(key, group);
+        if (thought === undefined) {
+          thought = {
+            anchor: row,
+            canonical: false,
+            closed: false,
+            content: "",
+            nextOffset: null,
+            outputIndex: output.length,
+          };
+          thoughts.set(key, thought);
+          output.push(null);
+        }
+
+        if (storedThought.offset !== null) {
+          const update = storedThought;
+          thought.canonical = true;
+          if (update.offset === 0) {
+            thought.content = update.content;
+            thought.nextOffset = update.content.length;
+          } else if (thought.nextOffset === null) {
+            // A bounded history window cannot reconstruct a missing first chunk.
+            thought.content = "";
+          } else {
+            if (update.offset !== thought.nextOffset) {
+              throw new Error("Persisted thought content chunks are not contiguous.");
+            }
+            thought.content += update.content;
+            thought.nextOffset += update.content.length;
+          }
+        } else if (row.event_type === "thought.delta") {
+          if (thought.canonical || thought.closed) {
+            continue;
+          }
+          thought.content += storedThought.content;
+        } else if (
+          row.event_type === "thought.completed" ||
+          row.event_type === "thought.cancelled"
+        ) {
+          thought.closed = true;
+        }
+
+        output[thought.outputIndex] =
+          thought.content.length === 0
+            ? null
+            : {
+                ...row,
+                content_text: thought.content,
+                occurred_at: thought.anchor.occurred_at,
+                seq: thought.anchor.seq,
+              };
+        continue;
+      }
+
+      const classification = streamRowClassifications[row.event_type];
+
+      if (classification === undefined) {
+        // A terminal run receipt flushes the run's interrupted streams, exactly
+        // like the pre-persistence compactor did, so a failed run still shows
+        // the text it managed to stream.
+        if (terminalRunEventTypes.has(row.event_type)) {
+          for (const [key, group] of openGroups) {
+            if (group.runId === row.run_id) {
+              openGroups.delete(key);
+              closeGroupAsFragment(key, group);
+            }
           }
         }
-      }
 
-      output.push(row);
-      continue;
-    }
-
-    const key = `${row.run_id ?? ""}:${row.process_type}`;
-    const existing = openGroups.get(key) ?? null;
-
-    if (classification.phase === "started") {
-      if (existing !== null) {
-        openGroups.delete(key);
-        closeGroupAsFragment(key, existing);
-      }
-
-      const group = createOpenStreamGroup(row, classification);
-      mergeStreamRow(group, row, classification);
-      openGroups.set(key, group);
-      continue;
-    }
-
-    if (classification.phase === "added" && existing === null) {
-      // A snapshot with no open stream is either a complete standalone
-      // message (legacy compacted rows and non-streamed messages) or the
-      // authoritative copy of fragments that already closed; the supersede
-      // check keeps the first case verbatim.
-      closeGroupWithSnapshot(key, row.content_text === classification.placeholder ? null : row);
-
-      if (row.content_text === classification.placeholder) {
         output.push(row);
+        continue;
       }
-      continue;
+
+      const key = `${row.run_id ?? ""}:${row.process_type}`;
+      const existing = openGroups.get(key) ?? null;
+
+      if (classification.phase === "started") {
+        if (existing !== null) {
+          openGroups.delete(key);
+          closeGroupAsFragment(key, existing);
+        }
+
+        const group = createOpenStreamGroup(row, classification);
+        mergeStreamRow(group, row, classification);
+        openGroups.set(key, group);
+        continue;
+      }
+
+      if (classification.phase === "added" && existing === null) {
+        // A snapshot with no open stream is either a complete standalone
+        // message (legacy compacted rows and non-streamed messages) or the
+        // authoritative copy of fragments that already closed; the supersede
+        // check keeps the first case verbatim.
+        closeGroupWithSnapshot(key, row.content_text === classification.placeholder ? null : row);
+
+        if (row.content_text === classification.placeholder) {
+          output.push(row);
+        }
+        continue;
+      }
+
+      const group = existing ?? createOpenStreamGroup(row, classification);
+      mergeStreamRow(group, row, classification);
+
+      if (classification.phase === "added") {
+        openGroups.delete(key);
+        closeGroupWithSnapshot(key, createFoldedStreamRow(group));
+      } else if (classification.phase === "completed") {
+        openGroups.delete(key);
+        closeGroupAsFragment(key, group);
+      } else if (existing === null) {
+        openGroups.set(key, group);
+      }
     }
+  }
 
-    const group = existing ?? createOpenStreamGroup(row, classification);
-    mergeStreamRow(group, row, classification);
-
-    if (classification.phase === "added") {
-      openGroups.delete(key);
-      closeGroupWithSnapshot(key, createFoldedStreamRow(group));
-    } else if (classification.phase === "completed") {
-      openGroups.delete(key);
+  function finish(): R[] {
+    for (const [key, group] of openGroups) {
       closeGroupAsFragment(key, group);
-    } else if (existing === null) {
-      openGroups.set(key, group);
     }
+    openGroups.clear();
+    return output.filter((row): row is R => row !== null);
   }
 
-  for (const [key, group] of openGroups) {
-    closeGroupAsFragment(key, group);
-  }
+  return { append, finish };
+}
 
-  return output.filter((row): row is R => row !== null);
+export function foldStreamedSessionEventRows<R extends StreamFoldableSessionEventRow>(
+  rows: readonly R[],
+): R[] {
+  const folder = createStreamedSessionEventRowFolder<R>();
+  folder.append(rows);
+  return folder.finish();
 }

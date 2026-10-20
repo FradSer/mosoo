@@ -12,15 +12,24 @@ import {
 import type { SessionProcessEvent } from "@mosoo/contracts/session";
 import { parseJsonObject } from "@mosoo/contracts/validation";
 import type { JsonObject } from "@mosoo/contracts/validation";
-import { sessionEventsTable, sessionMessagesTable } from "@mosoo/db";
+import { sessionMessagesTable } from "@mosoo/db";
 import type { RuntimeEventId, SessionId, SessionRunId } from "@mosoo/id";
-import { and, asc, desc, eq, gt, lt } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { createErrorLogContext, logWarn } from "../../platform/cloudflare/logger";
 import { getAppDatabase } from "../../platform/db/drizzle";
-import { createSessionProcessEventsFromSessionEventRows } from "../sessions/application/session-process-events.service";
-import type { SessionEventProcessRow } from "../sessions/application/session-process-events.service";
+import { toIsoString } from "../../time";
+import { createSessionProcessEventsFromFoldedRows } from "../sessions/application/session-process-events.service";
+import { readStoredThoughtEvent } from "../sessions/domain/session-event-stream-fold";
+import {
+  readFoldedSessionEventRows,
+  readSessionEventRowsAfterSeq,
+  readSessionEventWindow,
+} from "../sessions/infrastructure/session-event-read.repository";
+import type {
+  SessionEventProcessRow,
+  SessionEventReadWindow,
+} from "../sessions/infrastructure/session-event-read.repository";
 import { connectSessionPublicEventWebSocket } from "../sessions/infrastructure/session/client";
 import { publicInternalError, toPublicApiError } from "./public-api-errors";
 import { sanitizePublicOutput } from "./public-output-sanitization";
@@ -30,7 +39,6 @@ import type {
   StreamPublicThreadEventsRequest,
 } from "./public-thread.types";
 
-const THREAD_EVENT_ROW_PAGE_SIZE = PUBLIC_THREAD_EVENTS_MAX_LIMIT;
 const THREAD_EVENT_RAW_ROW_SCAN_LIMIT = PUBLIC_THREAD_EVENTS_MAX_LIMIT * 20;
 const THREAD_EVENT_STREAM_POLL_INTERVAL_MS = 2_000;
 const THREAD_EVENT_STREAM_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -39,19 +47,11 @@ const PUBLIC_THREAD_EVENT_LOG_TYPE_SET: ReadonlySet<string> = new Set(
 );
 const SSE_TEXT_ENCODER = new TextEncoder();
 
-interface PublicThreadEventWindow {
+interface PublicThreadEventWindow extends SessionEventReadWindow {
   events: PublicThreadEventLogEntry[];
-  latestSeq: number | null;
-  rows: PublicThreadEventProcessRow[];
-  truncated: boolean;
 }
 
-interface PublicThreadEventProcessRow extends SessionEventProcessRow {
-  run_id: SessionRunId | null;
-  tool_call_id: string | null;
-  tool_input_json: string | null;
-  tool_name: string | null;
-}
+type PublicThreadEventProcessRow = SessionEventProcessRow;
 
 interface LiveMessageState {
   filter: OpenAiPrivateCitationStreamFilter;
@@ -61,6 +61,10 @@ interface LiveMessageState {
 class PublicLiveEventRowProjector {
   readonly #messages = new Map<string, LiveMessageState>();
   readonly #messageKeysByRun = new Map<string, Set<string>>();
+  readonly #thoughts = new Map<
+    string,
+    { filter: OpenAiPrivateCitationStreamFilter; nextOffset: number; runId: SessionRunId | null }
+  >();
 
   #getMessageRunKey(row: PublicThreadEventProcessRow): string {
     return row.run_id ?? "";
@@ -96,6 +100,9 @@ class PublicLiveEventRowProjector {
   }
 
   #deleteRunMessages(runId: SessionRunId | null): void {
+    for (const [key, thought] of this.#thoughts) {
+      if (thought.runId === runId) this.#thoughts.delete(key);
+    }
     const runKey = runId ?? "";
     const messageKeys = this.#messageKeysByRun.get(runKey);
 
@@ -114,6 +121,41 @@ class PublicLiveEventRowProjector {
     const output: PublicThreadEventProcessRow[] = [];
 
     for (const row of rows) {
+      if (row.event_type.startsWith("thought.")) {
+        if (
+          row.event_type === "thought.started" ||
+          row.event_type === "thought.delta" ||
+          row.thought_id === null
+        ) {
+          continue;
+        }
+        const storedThought = readStoredThoughtEvent(row);
+        if (storedThought === null) continue;
+        const thoughtKey = JSON.stringify([row.run_id, storedThought.thoughtId]);
+        if (storedThought.offset !== null) {
+          let thought = this.#thoughts.get(thoughtKey);
+          if (thought === undefined) {
+            if (storedThought.offset !== 0) continue;
+            thought = {
+              filter: new OpenAiPrivateCitationStreamFilter(),
+              nextOffset: 0,
+              runId: row.run_id,
+            };
+            this.#thoughts.set(thoughtKey, thought);
+          }
+          if (storedThought.offset !== thought.nextOffset) {
+            throw new Error("Persisted thought content chunks are not contiguous.");
+          }
+          thought.nextOffset += storedThought.content.length;
+          output.push({ ...row, content_text: thought.filter.push(storedThought.content).text });
+        } else {
+          const contentText = this.#thoughts.get(thoughtKey)?.filter.finish().text ?? "";
+          this.#thoughts.delete(thoughtKey);
+          if (contentText.length > 0) output.push({ ...row, content_text: contentText });
+        }
+        continue;
+      }
+
       const key = this.#getMessageKey(row);
 
       if (row.event_type === "message.started") {
@@ -176,14 +218,6 @@ class PublicLiveEventRowProjector {
           }
           continue;
         }
-      }
-
-      if (
-        row.event_type === "thought.started" ||
-        row.event_type === "thought.completed" ||
-        row.event_type === "thought.cancelled"
-      ) {
-        continue;
       }
 
       if (
@@ -353,7 +387,7 @@ function toPublicThreadEventLogEntries(
     rows.map((row) => [row.id, row]),
   );
 
-  return createSessionProcessEventsFromSessionEventRows(rows).flatMap((event) => {
+  return createSessionProcessEventsFromFoldedRows(rows).flatMap((event) => {
     const publicEvent = toPublicThreadEventLogEntry({
       event,
       row: rowsByEventId.get(event.id),
@@ -362,33 +396,24 @@ function toPublicThreadEventLogEntries(
   });
 }
 
-function selectPublicThreadEventRows(input: {
-  database: D1Database;
-  filters: SQL[];
-  order: SQL;
-  pageSize: number;
-}) {
-  return getAppDatabase(input.database)
-    .select({
-      content_text: sessionEventsTable.contentText,
-      ended_at: sessionEventsTable.endedAt,
-      event_type: sessionEventsTable.eventType,
-      id: sessionEventsTable.id,
-      occurred_at: sessionEventsTable.occurredAt,
-      process_status: sessionEventsTable.processStatus,
-      process_type: sessionEventsTable.processType,
-      run_id: sessionEventsTable.runId,
-      seq: sessionEventsTable.seq,
-      tool_call_id: sessionEventsTable.toolCallId,
-      tool_input_json: sessionEventsTable.toolInputJson,
-      tool_name: sessionEventsTable.toolName,
-      tokens: sessionEventsTable.tokens,
-    })
-    .from(sessionEventsTable)
-    .where(and(...input.filters))
-    .orderBy(input.order)
-    .limit(input.pageSize)
-    .all();
+function toPublicThreadStreamEventLogEntries(
+  rows: PublicThreadEventProcessRow[],
+): PublicThreadEventLogEntry[] {
+  return rows.flatMap((row) => {
+    const event = toPublicThreadEventLogEntry({
+      event: {
+        content: row.content_text,
+        durationMs: Math.max(0, row.ended_at - row.occurred_at),
+        id: row.id,
+        occurredAt: toIsoString(row.occurred_at),
+        status: row.process_status,
+        tokens: row.tokens,
+        type: row.process_type,
+      },
+      row,
+    });
+    return event === null ? [] : [event];
+  });
 }
 
 async function readPublicThreadEventWindow(input: {
@@ -396,82 +421,31 @@ async function readPublicThreadEventWindow(input: {
   limit: number;
   sessionId: SessionId;
 }): Promise<PublicThreadEventWindow> {
-  const scannedRows: PublicThreadEventProcessRow[] = [];
-  let beforeSeq: number | null = null;
-  let reachedStart = false;
-  let latestSeq: number | null = null;
-
-  while (scannedRows.length < THREAD_EVENT_RAW_ROW_SCAN_LIMIT) {
-    const remainingRows = THREAD_EVENT_RAW_ROW_SCAN_LIMIT - scannedRows.length;
-    const pageSize = Math.min(THREAD_EVENT_ROW_PAGE_SIZE, remainingRows);
-    const filters = [
-      eq(sessionEventsTable.sessionId, input.sessionId),
-      eq(sessionEventsTable.visibility, "all_consumers"),
-    ];
-
-    if (beforeSeq !== null) {
-      filters.push(lt(sessionEventsTable.seq, beforeSeq));
-    }
-
-    const page = await selectPublicThreadEventRows({
-      database: input.database,
-      filters,
-      order: desc(sessionEventsTable.seq),
-      pageSize,
+  let rowLimit = PUBLIC_THREAD_EVENTS_MAX_LIMIT;
+  for (;;) {
+    const window = await readSessionEventWindow(input.database, {
+      rowLimit,
+      sessionId: input.sessionId,
     });
-
-    if (page.length === 0) {
-      reachedStart = true;
-      break;
-    }
-
-    latestSeq ??= page[0]?.seq ?? null;
-    scannedRows.push(...page);
-    beforeSeq = page[page.length - 1]?.seq ?? beforeSeq;
-
-    const events = toPublicThreadEventLogEntries(scannedRows.toReversed());
-
-    if (events.length > input.limit) {
+    const rows = await readFoldedSessionEventRows(input.database, {
+      sessionId: input.sessionId,
+      window,
+    });
+    const events = toPublicThreadEventLogEntries(rows);
+    if (
+      events.length > input.limit ||
+      !window.truncated ||
+      window.rowCount < rowLimit ||
+      rowLimit === THREAD_EVENT_RAW_ROW_SCAN_LIMIT
+    ) {
       return {
+        ...window,
         events: events.slice(-input.limit),
-        latestSeq,
-        rows: scannedRows.toReversed(),
-        truncated: true,
+        truncated: window.truncated || events.length > input.limit,
       };
     }
-
-    if (page.length < pageSize) {
-      reachedStart = true;
-      break;
-    }
+    rowLimit = Math.min(rowLimit * 2, THREAD_EVENT_RAW_ROW_SCAN_LIMIT);
   }
-
-  const events = toPublicThreadEventLogEntries(scannedRows.toReversed());
-  const truncated = !reachedStart || events.length > input.limit;
-
-  return {
-    events: truncated ? events.slice(-input.limit) : events,
-    latestSeq,
-    rows: scannedRows.toReversed(),
-    truncated,
-  };
-}
-
-async function readPublicThreadEventRowsAfterSeq(input: {
-  afterSeq: number;
-  database: D1Database;
-  sessionId: SessionId;
-}): Promise<PublicThreadEventProcessRow[]> {
-  return selectPublicThreadEventRows({
-    database: input.database,
-    filters: [
-      eq(sessionEventsTable.sessionId, input.sessionId),
-      eq(sessionEventsTable.visibility, "all_consumers"),
-      gt(sessionEventsTable.seq, input.afterSeq),
-    ],
-    order: asc(sessionEventsTable.seq),
-    pageSize: THREAD_EVENT_ROW_PAGE_SIZE,
-  });
 }
 
 export async function readPublicThreadRunFinalOutput(input: {
@@ -536,26 +510,6 @@ function enqueueSseText(controller: ReadableStreamDefaultController<Uint8Array>,
   controller.enqueue(SSE_TEXT_ENCODER.encode(text));
 }
 
-function enqueueThreadEvents(input: {
-  controller: ReadableStreamDefaultController<Uint8Array>;
-  emittedEventIds: Set<RuntimeEventId>;
-  events: PublicThreadEventLogEntry[];
-}): boolean {
-  let enqueued = false;
-
-  for (const event of input.events) {
-    if (input.emittedEventIds.has(event.id)) {
-      continue;
-    }
-
-    input.emittedEventIds.add(event.id);
-    enqueueSseText(input.controller, encodeSseThreadEvent(event));
-    enqueued = true;
-  }
-
-  return enqueued;
-}
-
 function isStreamStopped(input: {
   signal: AbortSignal | null | undefined;
   state: { cancelled: boolean };
@@ -580,98 +534,138 @@ export async function createPublicThreadEventStream(
   const { limit, threadId: sessionId } = request;
   await admitPublicThread(request.database, request.caller, sessionId, request.apiVersion);
   const wakeup = await connectPublicThreadEventWakeup(request, sessionId);
-  let initialWindow: PublicThreadEventWindow;
+  let initialWindow: SessionEventReadWindow;
 
   try {
-    initialWindow = await readPublicThreadEventWindow({
-      database: request.database,
-      limit,
+    initialWindow = await readSessionEventWindow(request.database, {
+      rowLimit: PUBLIC_THREAD_EVENTS_MAX_LIMIT,
       sessionId,
     });
   } catch (error) {
     wakeup.close();
     throw error;
   }
-  const emittedEventIds = new Set<RuntimeEventId>();
-  const state = {
-    cancelled: false,
-  };
+  const state = { cancelled: false, closed: false };
   let lastSeenSeq = initialWindow.latestSeq ?? 0;
-  const liveProjector = new PublicLiveEventRowProjector();
-  const initialEvents = toPublicThreadEventLogEntries(
-    liveProjector.project(initialWindow.rows),
-  ).slice(-limit);
+  let lastHeartbeatAt = Date.now();
+  let liveProjector = new PublicLiveEventRowProjector();
+  let initialReplayPending = true;
+  let pendingEvents: PublicThreadEventLogEntry[] = [];
+  let detachAbort = () => {};
+
+  const closeWakeup = () => {
+    detachAbort();
+    wakeup.close();
+  };
+  const stopped = () => state.closed || isStreamStopped({ signal: request.signal, state });
+
+  async function readInitialEvents(): Promise<PublicThreadEventLogEntry[]> {
+    let rowLimit = PUBLIC_THREAD_EVENTS_MAX_LIMIT;
+    for (;;) {
+      liveProjector = new PublicLiveEventRowProjector();
+      const events: PublicThreadEventLogEntry[] = [];
+      let afterSeq = (initialWindow.oldestSeq ?? 1) - 1;
+      while (
+        !stopped() &&
+        initialWindow.oldestSeq !== null &&
+        initialWindow.latestSeq !== null &&
+        afterSeq < initialWindow.latestSeq
+      ) {
+        const rows = await readSessionEventRowsAfterSeq(request.database, {
+          afterSeq,
+          sessionId,
+          throughSeq: initialWindow.latestSeq,
+        });
+        if (rows.length === 0) break;
+        events.push(...toPublicThreadStreamEventLogEntries(liveProjector.project(rows)));
+        if (events.length > limit) events.splice(0, events.length - limit);
+        afterSeq = rows.at(-1)!.seq;
+      }
+      if (
+        stopped() ||
+        events.length >= limit ||
+        !initialWindow.truncated ||
+        initialWindow.rowCount < rowLimit ||
+        rowLimit === THREAD_EVENT_RAW_ROW_SCAN_LIMIT
+      ) {
+        lastSeenSeq = initialWindow.latestSeq ?? 0;
+        return events.toReversed();
+      }
+      rowLimit = Math.min(rowLimit * 2, THREAD_EVENT_RAW_ROW_SCAN_LIMIT);
+      initialWindow = await readSessionEventWindow(request.database, {
+        rowLimit,
+        sessionId,
+      });
+    }
+  }
 
   return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let lastHeartbeatAt = Date.now();
-
-      try {
+    start(controller) {
+      const onAbort = () => {
+        if (state.closed) return;
+        state.closed = true;
+        closeWakeup();
+        controller.close();
+      };
+      request.signal?.addEventListener("abort", onAbort, { once: true });
+      detachAbort = () => request.signal?.removeEventListener("abort", onAbort);
+      if (request.signal?.aborted === true) {
+        onAbort();
+      } else {
         enqueueSseText(controller, encodeSseComment("connected"));
-        enqueueThreadEvents({
-          controller,
-          emittedEventIds,
-          events: initialEvents,
-        });
-
-        while (!isStreamStopped({ signal: request.signal, state })) {
-          await wakeup.wait(THREAD_EVENT_STREAM_POLL_INTERVAL_MS, request.signal);
-
-          if (isStreamStopped({ signal: request.signal, state })) {
-            break;
+      }
+    },
+    async pull(controller) {
+      try {
+        if (initialReplayPending) {
+          pendingEvents = await readInitialEvents();
+          initialReplayPending = false;
+        }
+        while (!stopped()) {
+          const event = pendingEvents.pop();
+          if (event !== undefined) {
+            enqueueSseText(controller, encodeSseThreadEvent(event));
+            lastHeartbeatAt = Date.now();
+            return;
           }
 
-          let enqueuedEvents = false;
-
-          for (;;) {
-            const rows = await readPublicThreadEventRowsAfterSeq({
-              afterSeq: lastSeenSeq,
-              database: request.database,
-              sessionId,
-            });
-
-            if (rows.length === 0) {
-              break;
-            }
-
-            lastSeenSeq = rows[rows.length - 1]?.seq ?? lastSeenSeq;
-            enqueuedEvents =
-              enqueueThreadEvents({
-                controller,
-                emittedEventIds,
-                events: toPublicThreadEventLogEntries(liveProjector.project(rows)),
-              }) || enqueuedEvents;
-
-            if (rows.length < THREAD_EVENT_ROW_PAGE_SIZE) {
-              break;
-            }
-          }
-
-          const now = Date.now();
-
-          if (enqueuedEvents) {
-            lastHeartbeatAt = now;
+          const rows = await readSessionEventRowsAfterSeq(request.database, {
+            afterSeq: lastSeenSeq,
+            sessionId,
+          });
+          if (stopped()) return;
+          if (rows.length > 0) {
+            lastSeenSeq = rows.at(-1)!.seq;
+            pendingEvents = toPublicThreadStreamEventLogEntries(
+              liveProjector.project(rows),
+            ).toReversed();
             continue;
           }
 
-          if (now - lastHeartbeatAt >= THREAD_EVENT_STREAM_HEARTBEAT_INTERVAL_MS) {
+          if (Date.now() - lastHeartbeatAt >= THREAD_EVENT_STREAM_HEARTBEAT_INTERVAL_MS) {
             enqueueSseText(controller, encodeSseComment("keepalive"));
-            lastHeartbeatAt = now;
+            lastHeartbeatAt = Date.now();
+            return;
           }
+          await wakeup.wait(THREAD_EVENT_STREAM_POLL_INTERVAL_MS, request.signal);
         }
       } catch (error) {
-        enqueueSseText(
-          controller,
-          `event: thread.error\ndata: ${JSON.stringify(toSseErrorPayload(error))}\n\n`,
-        );
-      } finally {
-        wakeup.close();
-        controller.close();
+        if (!stopped()) {
+          enqueueSseText(
+            controller,
+            `event: thread.error\ndata: ${JSON.stringify(toSseErrorPayload(error))}\n\n`,
+          );
+          state.closed = true;
+          closeWakeup();
+          controller.close();
+        }
       }
     },
     cancel() {
       state.cancelled = true;
-      wakeup.close();
+      state.closed = true;
+      pendingEvents = [];
+      closeWakeup();
     },
   });
 }

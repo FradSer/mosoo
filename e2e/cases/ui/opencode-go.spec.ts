@@ -22,8 +22,21 @@ for (const width of [1440, 390]) {
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByRole("heading", { name: "Add OpenCode Go key" })).toBeVisible();
     await expect(dialog.getByLabel("API key", { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel("API key", { exact: true })).toHaveAttribute(
+      "placeholder",
+      "oc_sk_...",
+    );
     await expect(dialog.getByLabel("Base URL", { exact: true })).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeVisible();
     await dialog.screenshot({ path: `${output}/dialog-${width}.png` });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    const zen = page.locator("section").filter({
+      has: page.getByRole("heading", { name: "OpenCode Zen", exact: true }),
+    });
+    await zen.getByRole("button", { name: "Add key", exact: true }).click();
+    await expect(dialog.getByLabel("API key", { exact: true })).toHaveAttribute(
+      "placeholder",
+      "sk-...",
+    );
   });
 }

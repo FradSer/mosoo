@@ -20,7 +20,6 @@ export interface CreateBootPayloadInput {
   bootToken: string;
   controlUrl: string;
   driverControlPort: number;
-  driverGeneration: number;
   driverInstanceId: DriverInstanceId;
   execution: unknown;
   heartbeatIntervalMs: number;
@@ -39,7 +38,6 @@ export type RuntimeActionTokenPayload =
   | (RuntimeActionTokenPayloadBase & {
       action: "llm_proxy";
       projectId: ProjectId;
-      driverGeneration: number;
       imageModelId?: string;
       modelId: string;
       modelProtocol: PresetModelProtocol;
@@ -174,7 +172,6 @@ export function createDriverBootPayload(input: CreateBootPayloadInput): DriverBo
     bootToken: input.bootToken,
     controlUrl: input.controlUrl,
     driverControlPort: input.driverControlPort,
-    driverGeneration: input.driverGeneration,
     driverInstanceId: input.driverInstanceId,
     execution: input.execution,
     heartbeatIntervalMs: input.heartbeatIntervalMs,

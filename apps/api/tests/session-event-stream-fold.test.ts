@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { RuntimeEventId, SessionRunId } from "@mosoo/id";
+import type { RuntimeEventKind } from "@mosoo/runtime-events";
 
 import { foldStreamedSessionEventRows } from "../src/modules/sessions/domain/session-event-stream-fold";
 import type { StreamFoldableSessionEventRow } from "../src/modules/sessions/domain/session-event-stream-fold";
@@ -24,11 +25,106 @@ function row(input: {
     process_type: input.processType ?? "agent.message.delta",
     run_id: input.runId === undefined ? RUN_ID : input.runId,
     seq: input.seq,
+    thought_id: null,
+    thought_offset: null,
     tokens: null,
   };
 }
 
+function thoughtRow(input: {
+  content?: string;
+  kind: RuntimeEventKind;
+  offset?: number;
+  seq: number;
+  thoughtId: string;
+}): StreamFoldableSessionEventRow {
+  return {
+    ...row({
+      content: input.content ?? "Agent thinking updated.",
+      eventType: input.kind,
+      id: `thought-${input.seq}`,
+      processType: "agent.thinking.delta",
+      seq: input.seq,
+    }),
+    thought_id: input.thoughtId,
+    thought_offset: input.kind === "thought.updated" ? (input.offset ?? 0) : null,
+  };
+}
+
 describe("session event stream folding", () => {
+  test("groups thought previews by their persisted identity", () => {
+    const folded = foldStreamedSessionEventRows([
+      thoughtRow({
+        kind: "thought.delta",
+        thoughtId: "old",
+        content: "Existing history",
+        seq: 1,
+      }),
+      thoughtRow({
+        kind: "thought.completed",
+        thoughtId: "old",
+        seq: 2,
+      }),
+    ]);
+    expect(folded.map((entry) => entry.content_text)).toEqual(["Existing history"]);
+  });
+
+  test("replaces thought previews by identity, including shorter, empty and cancelled text", () => {
+    const folded = foldStreamedSessionEventRows([
+      thoughtRow({ kind: "thought.delta", thoughtId: "a", content: "Long preview", seq: 1 }),
+      thoughtRow({ kind: "thought.delta", thoughtId: "b", content: "Other preview", seq: 2 }),
+      thoughtRow({ kind: "thought.delta", thoughtId: "c", content: "Cleared preview", seq: 3 }),
+      thoughtRow({ kind: "thought.updated", thoughtId: "b", content: "Final 😀", seq: 4 }),
+      thoughtRow({ kind: "thought.updated", thoughtId: "a", content: "Short", seq: 5 }),
+      thoughtRow({ kind: "thought.updated", thoughtId: "b", content: " text", offset: 8, seq: 6 }),
+      thoughtRow({ kind: "thought.updated", thoughtId: "c", content: "", seq: 7 }),
+      thoughtRow({ kind: "thought.cancelled", thoughtId: "a", seq: 8 }),
+      thoughtRow({ kind: "thought.completed", thoughtId: "b", seq: 9 }),
+      thoughtRow({ kind: "thought.completed", thoughtId: "c", seq: 10 }),
+      thoughtRow({ kind: "thought.delta", thoughtId: "a", content: "Late preview", seq: 11 }),
+      thoughtRow({ kind: "thought.delta", thoughtId: "c", content: "Late preview", seq: 12 }),
+    ]);
+
+    expect(folded.map((entry) => entry.content_text)).toEqual(["Short", "Final 😀 text"]);
+    expect(folded[0]).toMatchObject({ event_type: "thought.cancelled", seq: 1 });
+    expect(folded[1]).toMatchObject({ event_type: "thought.completed", seq: 2 });
+  });
+
+  test("uses canonical thought text when every preview is missing", () => {
+    const folded = foldStreamedSessionEventRows([
+      thoughtRow({ kind: "thought.updated", thoughtId: "a", content: "Saved", seq: 1 }),
+      thoughtRow({ kind: "thought.updated", thoughtId: "a", content: " text", offset: 5, seq: 2 }),
+      thoughtRow({ kind: "thought.completed", thoughtId: "a", seq: 3 }),
+    ]);
+
+    expect(folded.map((entry) => entry.content_text)).toEqual(["Saved text"]);
+  });
+
+  test("omits an incomplete thought when the query window lost its first chunk", () => {
+    const folded = foldStreamedSessionEventRows([
+      thoughtRow({ kind: "thought.delta", thoughtId: "a", content: "Wrong preview", seq: 1 }),
+      thoughtRow({ kind: "thought.updated", thoughtId: "a", content: "suffix", offset: 9, seq: 2 }),
+      thoughtRow({ kind: "thought.completed", thoughtId: "a", seq: 3 }),
+    ]);
+
+    expect(folded).toEqual([]);
+  });
+
+  test("rejects a gap inside persisted canonical thought chunks", () => {
+    expect(() =>
+      foldStreamedSessionEventRows([
+        thoughtRow({ kind: "thought.updated", thoughtId: "a", content: "first", seq: 1 }),
+        thoughtRow({
+          kind: "thought.updated",
+          thoughtId: "a",
+          content: "third",
+          offset: 10,
+          seq: 2,
+        }),
+      ]),
+    ).toThrow("not contiguous");
+  });
+
   test.each(["message.cancelled", "message.failed", "thought.cancelled"])(
     "closes %s with the persisted partial text",
     (eventType) => {

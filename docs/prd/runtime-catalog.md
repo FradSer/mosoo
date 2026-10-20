@@ -10,13 +10,16 @@ Which runtimes and models a Project can run, and how providers and model protoco
 - OpenCode and Pi accept all four protocols, OpenAI Runtime only Responses, and Claude Agent SDK only Anthropic Messages for Anthropic models. A runtime and protocol pair that does not match is rejected before any execution.
 - Custom providers are `openai-compatible` in the API. When a Project's only usable keys are custom, a new Agent in the console defaults to OpenCode; Pi or OpenAI Runtime runs custom models only when chosen explicitly. Pi's default is an incomplete placeholder until a preset model or a model declared on a custom credential is selected.
 - OpenCode Go is a separate provider from OpenCode Zen. Add a Go API key in Providers and select a Go model with OpenCode or Pi. The catalog contains a curated model list with each model's protocol; [OpenCode's Go documentation](https://opencode.ai/docs/go/) defines the upstream endpoints and subscription limits. Mosoo does not sell or manage the subscription.
-- Go requests identify Mosoo with the current Cloudflare Worker version ID (`mosoo/dev` for local callers without deployment metadata) and use the Host Session ID for routing and caching, including after Driver replacement. Manual credential tests use a separate temporary conversation ID. Provider keys stay behind the Host proxy.
+- Go requests identify Mosoo with the current Cloudflare Worker version ID (`mosoo/dev` for local callers without deployment metadata) and use the Host Session ID for routing and caching, including after Driver replacement. Manual credential tests use a separate temporary conversation ID and a minimal inference request, which consumes subscription usage; the public model list does not verify a key. Provider keys stay behind the Host proxy.
+- Pi preserves the installed native catalog’s capabilities, limits and prices for an exact provider and model match, including through the model proxy.
+- Pi’s advanced settings accept a thinking level; activation rejects levels that the selected native model cannot use. Omitting the setting keeps Pi’s default.
 - Publishing does not lock an Agent's runtime or model.
 
 ## Limits
 
 - Only Claude Agent SDK can disable individual built-in tools. The other runtimes reject an explicitly disabled tool instead of silently re-enabling it.
 - Pi takes text input only; files reach it through the Session workspace. Pi uses mosoo-managed provider keys only: no Pi OAuth login, Bedrock signing or Vertex ambient credentials.
+- Models absent from Pi’s native provider catalog use its generic text-only defaults without reasoning support or known pricing; metadata is never borrowed from another provider.
 - A matching protocol does not prove that an endpoint supports the streaming and tool calls a runtime needs.
 - Changing a custom credential's protocol breaks the Sessions that use it: their model calls are refused, and continuing them fails with a request to restore the protocol or start a new Session. A native conversation never switches protocols.
 - A custom credential saved without a protocol keeps its old per-runtime route (Responses on OpenAI Runtime, Chat Completions elsewhere) until one is declared. A declared protocol cannot be cleared.

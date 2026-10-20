@@ -37,6 +37,54 @@ function envelope(kind: string, payload: unknown, fields: Record<string, unknown
 }
 
 describe("Driver protocol projection bridge", () => {
+  test("recovers corrected reasoning from durable chunks without delivered previews", () => {
+    const events = [
+      envelope(
+        "thought.delta",
+        { thoughtId: "thought-1", contentDelta: "old\n\n" },
+        { delivery: "best_effort" },
+      ),
+      envelope("thought.updated", { thoughtId: "thought-1", content: "New😀", offset: 0 }),
+      envelope(
+        "thought.delta",
+        { thoughtId: "thought-1", contentDelta: "late" },
+        { delivery: "best_effort" },
+      ),
+      envelope("thought.updated", {
+        thoughtId: "thought-1",
+        content: " final",
+        offset: "New😀".length,
+      }),
+      envelope("thought.cancelled", { thoughtId: "thought-1" }),
+    ].map(parseRuntimeEventEnvelope);
+    const projected = events.flatMap(projectRuntimeEventToAgUiSessionEvents);
+    const initial = createInitialSessionLiveState({
+      sessionId: PLATFORM_ID_FIXTURES.session,
+      title: null,
+      viewerId: "viewer",
+    });
+    const live = applyAgUiEventsToSessionLiveState(initial, projected);
+    const recovered = applyAgUiEventsToSessionLiveState(
+      initial,
+      events
+        .filter((event) => event.kind !== "thought.delta")
+        .flatMap(projectRuntimeEventToAgUiSessionEvents),
+    );
+    expect(live.messages.map((message) => message.segments)).toEqual([
+      [{ kind: "reasoning", status: "completed", text: "New😀 final" }],
+    ]);
+    expect(recovered.messages.map((message) => message.segments)).toEqual(
+      live.messages.map((message) => message.segments),
+    );
+    expect(
+      createProcessDraftFromRuntimeEvent(
+        parseRuntimeEventEnvelope(
+          envelope("thought.updated", { thoughtId: "thought-2", content: "", offset: 0 }),
+        ),
+      ),
+    ).toEqual({ content: "", type: "agent.thinking.delta" });
+  });
+
   test.each(["2026-05-26", "2026-08-29"])("rejects %s as live traffic", (schemaVersion) => {
     expect(() =>
       parseRuntimeEventEnvelope(envelope("run.completed", { checkpoint }, { schemaVersion })),
@@ -186,6 +234,34 @@ describe("Driver protocol projection bridge", () => {
     expect(() =>
       parseRuntimeEventEnvelope(envelope("context.usage.updated", { used: 12, size: 10, cost: 1 })),
     ).toThrow();
+  });
+
+  test("preserves OpenCode native step usage through Host validation and live projection", () => {
+    const usage = {
+      cachedReadTokens: 2_000,
+      costAmount: 0.001234,
+      costCurrency: "USD",
+      inputTokens: 8_000,
+      outputTokens: 42,
+      source: "native_step_totals",
+      totalTokens: 10_042,
+      usageContract: "anthropic_bucketed",
+    };
+    const event = parseRuntimeEventEnvelope(
+      envelope("usage.updated", usage, { runtimeId: "acp-fallback" }),
+    );
+    expect(event.payload).toEqual(usage);
+    const initial = createInitialSessionLiveState({
+      sessionId: PLATFORM_ID_FIXTURES.session,
+      title: null,
+      viewerId: "viewer",
+    });
+    const state = applyAgUiEventsToSessionLiveState(
+      initial,
+      projectRuntimeEventToAgUiSessionEvents(event),
+    );
+    expect(state.usage).toEqual(usage);
+    expect(createProcessDraftFromRuntimeEvent(event).tokens).toBe(usage.totalTokens);
   });
 
   test("does not expose internal driver events to participants", () => {

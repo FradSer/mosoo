@@ -4,7 +4,12 @@ import type {
   TestVendorCredentialResult,
 } from "@mosoo/contracts/vendor-credential";
 import type { RuntimeCatalogVendor } from "@mosoo/runtime-catalog";
-import { VENDOR_OPENAI_COMPATIBLE, getPresetModel, getVendor } from "@mosoo/runtime-catalog";
+import {
+  VENDOR_OPENAI_COMPATIBLE,
+  getDefaultModelIdForVendor,
+  getPresetModel,
+  getVendor,
+} from "@mosoo/runtime-catalog";
 
 import {
   captureServerProductEvent,
@@ -241,13 +246,17 @@ export async function probeVendorCredential(
   const apiKey = input.apiKey.trim();
   const apiBase = normalizeApiBase(input.apiBase);
   const fetchProxy = input.fetchProxy ?? null;
-  const modelId = input.modelId?.trim() || null;
   const timeoutMs = input.timeoutMs ?? 10_000;
   const vendor = getVendor(input.vendorId);
 
   if (vendor === null) {
     throw new Error(`Unknown vendor: ${input.vendorId}.`);
   }
+  // Go's public model list does not authenticate a subscription key.
+  const requiresInferenceProbe = vendor.vendorId === "opencode-go";
+  const modelId =
+    input.modelId?.trim() ||
+    (requiresInferenceProbe ? getDefaultModelIdForVendor(vendor.vendorId) : null);
   const modelIdRequired = vendor.vendorId === VENDOR_OPENAI_COMPATIBLE.vendorId;
   const modelProtocol =
     input.modelProtocol ??
@@ -306,7 +315,7 @@ export async function probeVendorCredential(
   let errorCode: string | undefined;
 
   try {
-    if (input.verifyModelProtocol && modelId !== null) {
+    if ((input.verifyModelProtocol || requiresInferenceProbe) && modelId !== null) {
       const result =
         modelProtocol === null
           ? { errorCode: "unknown_model_protocol", ok: false }

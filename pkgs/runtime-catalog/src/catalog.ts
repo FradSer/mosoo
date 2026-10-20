@@ -12,7 +12,7 @@ export type RuntimeCatalogVendorAuthHeader =
       readonly scheme: "bearer";
     }
   | {
-      readonly apiKeyHeader: "x-api-key";
+      readonly apiKeyHeader: "x-api-key" | "x-goog-api-key";
       readonly extraHeaders: Readonly<Record<string, string>>;
       readonly scheme: "api-key";
     };
@@ -123,11 +123,11 @@ export const VENDOR_DEEPSEEK: RuntimeCatalogVendor = {
 export const VENDOR_GEMINI: RuntimeCatalogVendor = {
   apiBaseEnvVar: "GEMINI_BASE_URL",
   apiKeyEnvVar: "GEMINI_API_KEY",
-  authHeader: BEARER_AUTH,
-  defaultApiBase: "https://generativelanguage.googleapis.com/v1beta/openai",
+  authHeader: { apiKeyHeader: "x-goog-api-key", extraHeaders: {}, scheme: "api-key" },
+  defaultApiBase: "https://generativelanguage.googleapis.com/v1beta",
   iconKey: "gemini",
   label: "Gemini",
-  openCodeProvider: { name: "Gemini", npmPackage: "@ai-sdk/openai-compatible" },
+  openCodeProvider: { name: "Gemini", npmPackage: "@ai-sdk/google" },
   vendorId: "gemini",
 };
 
@@ -215,7 +215,7 @@ export const MODEL_DEFAULTS: Readonly<Record<string, string>> = {
   kimi: "kimi-k2.6",
   minimax: "MiniMax-M3",
   opencode: "deepseek-v4-pro",
-  "opencode-go": "deepseek-v4-flash",
+  "opencode-go": "deepseek-v4.1-flash",
   openai: "gpt-5.5",
   qwen: "qwen3.7-plus",
   zhipu: "glm-4.7",
@@ -333,7 +333,7 @@ export const PRESET_MODELS: readonly RuntimeCatalogPresetModel[] = [
   {
     displayName: "Gemini 3.5 Flash",
     modelId: "gemini-3.5-flash",
-    protocol: "openai-chat-completions",
+    protocol: "google-gemini",
     vendor: VENDOR_GEMINI,
   },
   {
@@ -415,8 +415,8 @@ export const PRESET_MODELS: readonly RuntimeCatalogPresetModel[] = [
     vendor: VENDOR_OPENCODE,
   },
   {
-    displayName: "DeepSeek V4 Flash",
-    modelId: "deepseek-v4-flash",
+    displayName: "DeepSeek V4.1 Flash",
+    modelId: "deepseek-v4.1-flash",
     protocol: "openai-chat-completions",
     vendor: VENDOR_OPENCODE_GO,
   },

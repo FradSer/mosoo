@@ -10,15 +10,17 @@ import { Hono } from "hono";
 import { registerDriverRoute } from "../src/adapters/http/routes/driver-route";
 import { getAccountViewer } from "../src/modules/auth/application/viewer-auth.service";
 import { getRuntimeDriverLlmProxyPath } from "../src/modules/runtime/domain/runtime-driver-routes";
+import { finalizeDriverInstance } from "../src/modules/runtime/infrastructure/driver-instance/lifecycle";
 import { createRuntimeActionToken } from "../src/modules/runtime/infrastructure/runtime-boot-token";
 import type { RuntimeActionTokenPayload } from "../src/modules/runtime/infrastructure/runtime-boot-token";
-import { buildVendorProxyEnvVars } from "../src/modules/runtime/infrastructure/runtime-sandbox-provisioning/runtime-vendor-proxy-env.builder";
+import { buildModelConnection } from "../src/modules/runtime/infrastructure/runtime-sandbox-provisioning/runtime-model-connection.builder";
 import { storeSecret } from "../src/modules/vault/application/vault-secret-store";
 import { testVendorCredential } from "../src/modules/vendor-credentials/application/vendor-credential-test";
 import { runWithRequestLogContext } from "../src/platform/cloudflare/logger";
 import type { ApiBindings, ApiGatewayEnvironment } from "../src/platform/cloudflare/worker-types";
 import {
   PI_PROXY_FINAL_TEXT,
+  PI_PROXY_THOUGHT_SIGNATURE,
   PI_PROXY_TOOL_PROOF,
   piProxyProtocolResponse,
   runOpenCodeProxyTurn,
@@ -106,7 +108,6 @@ async function insertDriverInstance(
   input: {
     bootTokenExpiresAt?: number;
     driverInstanceId?: DriverInstanceId;
-    generation?: number;
     lastHeartbeatAt?: number | null;
     sandboxSessionId?: string;
     updatedAt?: number;
@@ -123,14 +124,13 @@ async function insertDriverInstance(
       bootTokenUsedAt: null,
       closeCode: null,
       closeReason: null,
-      connectionId: null,
+      connectionId: `llm-proxy-${driverInstanceId}`,
       createdAt: nowMs,
       driverPid: null,
       driverStartedAt: null,
       driverVersion: null,
       errorMessage: null,
       expiresAt: nowMs + 60_000,
-      generation: input.generation ?? 0,
       heartbeatCount: 0,
       id: driverInstanceId,
       lastHeartbeatAt: input.lastHeartbeatAt ?? null,
@@ -191,7 +191,6 @@ async function createLlmProxyGrant(
   return createRuntimeActionToken(bindings, {
     action: "llm_proxy",
     projectId: PROJECT_ID,
-    driverGeneration: 0,
     driverInstanceId: DRIVER_INSTANCE_ID,
     expiresAt: Date.now() + 60_000,
     modelId: "claude-sonnet-5",
@@ -214,7 +213,6 @@ function llmProxyRequest(
 
 async function setupFixture(input?: {
   apiBase?: string | null;
-  driverGeneration?: number;
   driverStatus?: "provisioning" | "connecting" | "ready" | "failed" | "absent";
   driverUpdatedAt?: number;
   modelProtocol?: PresetModelProtocol | null;
@@ -225,7 +223,6 @@ async function setupFixture(input?: {
 
   if (input?.driverStatus !== "absent") {
     await insertDriverInstance(database, input?.driverStatus ?? "ready", {
-      generation: input?.driverGeneration,
       updatedAt: input?.driverUpdatedAt,
     });
   }
@@ -304,9 +301,8 @@ describe("driver LLM proxy route", () => {
         fetch: (request) => dispatch(bindings, request),
       });
       try {
-        const env = await buildVendorProxyEnvVars({
+        const connection = await buildModelConnection({
           bindings,
-          driverGeneration: 0,
           driverInstanceId: DRIVER_INSTANCE_ID,
           profile: {
             model: "pi-test",
@@ -323,7 +319,9 @@ describe("driver LLM proxy route", () => {
           },
           requestUrl: `http://127.0.0.1:${proxy.port}/api/sessions`,
         });
-        const events = await (runtimeId === "pi" ? runPiProxyTurn(env) : runOpenCodeProxyTurn(env));
+        const events = await (runtimeId === "pi"
+          ? runPiProxyTurn(connection, { provider: "openai-compatible", model: "pi-test" })
+          : runOpenCodeProxyTurn(connection));
         expect(modelCalls).toBe(2);
         if (runtimeId === "pi") {
           expect(
@@ -367,8 +365,7 @@ describe("driver LLM proxy route", () => {
           ).toBe(true);
         }
         expect(captured[1]?.body).toContain(PI_PROXY_TOOL_PROOF);
-        const grant =
-          env[runtimeId === "pi" ? "MOSOO_PI_PROXY_GRANT" : "OPENAI_COMPATIBLE_API_KEY"];
+        const grant = connection.proxyGrant;
         for (const request of captured) {
           expect(new URL(request.url).pathname).toBe(path);
           expect(request.headers.get(header)).toBe(value);
@@ -382,6 +379,134 @@ describe("driver LLM proxy route", () => {
         }
         if (protocol === "google-gemini")
           expect(new URL(captured[0]?.url ?? "").searchParams.get("alt")).toBe("sse");
+      } finally {
+        await proxy.stop(true);
+      }
+    },
+    35_000,
+  );
+
+  test.each([
+    {
+      vendorId: "deepseek",
+      model: "deepseek-v4-pro",
+      protocol: "openai-chat-completions",
+      provider: "deepseek",
+    },
+    { vendorId: "openai", model: "gpt-5.4", protocol: "openai-responses", provider: "openai" },
+    {
+      vendorId: "anthropic",
+      model: "claude-sonnet-5",
+      protocol: "anthropic-messages",
+      provider: "anthropic",
+    },
+    {
+      vendorId: "opencode",
+      model: "gemini-3.5-flash",
+      protocol: "google-gemini",
+      provider: "opencode",
+    },
+    {
+      vendorId: "gemini",
+      model: "gemini-3.5-flash",
+      protocol: "google-gemini",
+      provider: "google",
+    },
+  ] satisfies {
+    vendorId: string;
+    model: string;
+    protocol: PresetModelProtocol;
+    provider: string;
+  }[])(
+    "preserves native $vendorId model parameters in real $protocol proxy requests",
+    async ({ vendorId, model, protocol, provider }) => {
+      const { bindings } = await setupFixture({ vendorId });
+      let modelCalls = 0;
+      const captured = captureUpstreamFetch(() =>
+        piProxyProtocolResponse(protocol, ++modelCalls === 1),
+      );
+      const proxy = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: (request) => dispatch(bindings, request),
+      });
+      try {
+        const connection = await buildModelConnection({
+          bindings,
+          driverInstanceId: DRIVER_INSTANCE_ID,
+          profile: {
+            model,
+            runtimeId: "pi",
+            vendorCredential: {
+              credentialId: CREDENTIAL_ID,
+              projectId: PROJECT_ID,
+              vendorId,
+              models: [model],
+            },
+          },
+          requestUrl: `http://127.0.0.1:${proxy.port}/api/sessions`,
+        });
+        const events = await runPiProxyTurn(connection, {
+          provider: vendorId,
+          model,
+          thinkingLevel: "high",
+        });
+        expect(modelCalls).toBe(2);
+        const state = events.find((event) => event["id"] === "test-state");
+        expect(state).toMatchObject({ data: { model: { provider, id: model, reasoning: true } } });
+        expect(captured[1]?.body).toContain(PI_PROXY_TOOL_PROOF);
+        const body = JSON.parse(captured[0]?.body ?? "{}");
+        if (protocol === "openai-chat-completions") {
+          expect(body).toMatchObject({
+            model,
+            thinking: { type: "enabled" },
+            reasoning_effort: "high",
+          });
+          expect(body.max_tokens).toBeGreaterThan(0);
+          expect(body.max_completion_tokens).toBeUndefined();
+          expect(body.store).toBeUndefined();
+          expect(body.messages.some((entry: { role: string }) => entry.role === "developer")).toBe(
+            false,
+          );
+          const continuation = JSON.parse(captured[1]?.body ?? "{}");
+          expect(
+            continuation.messages.find((entry: { role: string }) => entry.role === "assistant")
+              .reasoning_content,
+          ).toBe("");
+        } else if (protocol === "openai-responses") {
+          expect(body).toMatchObject({ model, reasoning: { effort: "high" } });
+        } else if (protocol === "anthropic-messages") {
+          expect(body).toMatchObject({
+            model,
+            thinking: { type: "adaptive" },
+            output_config: { effort: "high" },
+          });
+          expect(body.max_tokens).toBeGreaterThan(0);
+        } else {
+          expect(new URL(captured[0]?.url ?? "").pathname).toEndWith(
+            `/models/${model}:streamGenerateContent`,
+          );
+          expect(body).toMatchObject({
+            generationConfig: { thinkingConfig: { thinkingLevel: "HIGH", includeThoughts: true } },
+          });
+          const continuation = JSON.parse(captured[1]?.body ?? "{}");
+          const toolCall = continuation.contents
+            .find((entry: { role: string }) => entry.role === "model")
+            .parts.find((part: { functionCall?: unknown }) => part.functionCall);
+          expect(toolCall).toMatchObject({
+            functionCall: { name: "bash" },
+            thoughtSignature: PI_PROXY_THOUGHT_SIGNATURE,
+          });
+          if (vendorId === "gemini") {
+            for (const request of captured) {
+              expect(request.url).toBe(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+              );
+              expect(request.headers.get("x-goog-api-key")).toBe(UPSTREAM_API_KEY);
+              expect(request.headers.has("authorization")).toBe(false);
+            }
+          }
+        }
       } finally {
         await proxy.stop(true);
       }
@@ -509,7 +634,6 @@ describe("driver LLM proxy route", () => {
         });
         expect(entry.metadata).toEqual({
           credentialId: CREDENTIAL_ID,
-          driverGeneration: 0,
           driverInstanceId: DRIVER_INSTANCE_ID,
           modelProtocol: "openai-chat-completions",
           projectId: PROJECT_ID,
@@ -1048,10 +1172,21 @@ describe("driver LLM proxy route", () => {
     expect(captured).toHaveLength(0);
   });
 
-  test("rejects grants minted for a stale driver generation", async () => {
-    const { bindings } = await setupFixture({ driverGeneration: 2 });
+  test("rejects the stopped instance's grant after a replacement instance becomes ready", async () => {
+    const { bindings, database } = await setupFixture();
     const captured = captureUpstreamFetch();
-    const grant = await createLlmProxyGrant(bindings, { driverGeneration: 1 });
+    const grant = await createLlmProxyGrant(bindings);
+    expect(
+      await finalizeDriverInstance(bindings, DRIVER_INSTANCE_ID, {
+        connectionId: `llm-proxy-${DRIVER_INSTANCE_ID}`,
+        heartbeatCount: 0,
+        status: "stopped",
+      }),
+    ).toBe(true);
+    await insertDriverInstance(database, "ready", { driverInstanceId: OTHER_DRIVER_INSTANCE_ID });
+    const replacementGrant = await createLlmProxyGrant(bindings, {
+      driverInstanceId: OTHER_DRIVER_INSTANCE_ID,
+    });
 
     const response = await dispatch(
       bindings,
@@ -1063,6 +1198,18 @@ describe("driver LLM proxy route", () => {
 
     expect(response.status).toBe(403);
     expect(captured).toHaveLength(0);
+
+    const replacementResponse = await dispatch(
+      bindings,
+      llmProxyRequest("/v1/messages", {
+        body: JSON.stringify({ model: "claude-sonnet-5" }),
+        headers: { "x-api-key": replacementGrant },
+        method: "POST",
+      }),
+    );
+
+    expect(replacementResponse.status).toBe(200);
+    expect(captured).toHaveLength(1);
   });
 
   test("rejects grants whose project does not own the credential", async () => {
@@ -1220,7 +1367,7 @@ describe("driver LLM proxy route", () => {
 
 describe("OpenCode Go subscription routing", () => {
   test.each([
-    ["openai-chat-completions", "/chat/completions", "deepseek-v4-flash"],
+    ["openai-chat-completions", "/chat/completions", "deepseek-v4.1-flash"],
     ["anthropic-messages", "/messages", "minimax-m2.7"],
     ["openai-responses", "/responses", "gpt-5.6-luna"],
   ] as const)(
@@ -1296,7 +1443,7 @@ describe("OpenCode Go subscription routing", () => {
 });
 
 test.each([
-  ["openai-chat-completions", "/chat/completions", "deepseek-v4-flash"],
+  ["openai-chat-completions", "/chat/completions", "deepseek-v4.1-flash"],
   ["anthropic-messages", "/messages", "minimax-m2.7"],
   ["openai-responses", "/responses", "gpt-5.6-luna"],
 ] as const)(
@@ -1315,9 +1462,8 @@ test.each([
         fetch: (request) => dispatch(bindings, request),
       });
       try {
-        const env = await buildVendorProxyEnvVars({
+        const connection = await buildModelConnection({
           bindings,
-          driverGeneration: 0,
           driverInstanceId: DRIVER_INSTANCE_ID,
           profile: {
             model: modelId,
@@ -1335,12 +1481,31 @@ test.each([
         });
         const events =
           runtimeId === "pi"
-            ? await runPiProxyTurn(env, modelId)
-            : await runOpenCodeProxyTurn(env, `opencode-go/${modelId}`);
+            ? await runPiProxyTurn(connection, { provider: "opencode-go", model: modelId })
+            : await runOpenCodeProxyTurn(connection, { provider: "opencode-go", model: modelId });
         expect(calls).toBe(2);
         expect(JSON.stringify(events)).toContain(PI_PROXY_TOOL_PROOF);
         expect(JSON.stringify(events)).toContain(PI_PROXY_FINAL_TEXT);
         expect(captured[1]?.body).toContain(PI_PROXY_TOOL_PROOF);
+        const completedMessages = events.filter((event) => {
+          if (runtimeId === "acp-fallback") return event["type"] === "step_finish";
+          const message = event["message"];
+          return (
+            event["type"] === "message_end" &&
+            typeof message === "object" &&
+            message !== null &&
+            "role" in message &&
+            message.role === "assistant"
+          );
+        });
+        expect(completedMessages).toHaveLength(2);
+        for (const message of completedMessages) {
+          expect(message).toMatchObject(
+            runtimeId === "pi"
+              ? { message: { usage: { input: 10, output: 10 } } }
+              : { part: { tokens: { input: 10, output: 10 } } },
+          );
+        }
         for (const request of captured) {
           const upstreamUrl = new URL(request.url);
           expect(upstreamUrl.origin + upstreamUrl.pathname).toBe(
@@ -1356,7 +1521,7 @@ test.each([
             `mosoo/${bindings.CF_VERSION_METADATA.id}`,
           );
           expect(request.headers.get("x-opencode-session")).toBe(PUBLIC_API_TEST_IDS.ownerSession);
-          const grant = env[runtimeId === "pi" ? "MOSOO_PI_PROXY_GRANT" : "OPENCODE_GO_API_KEY"];
+          const grant = connection.proxyGrant;
           expect(JSON.stringify([...request.headers])).not.toContain(grant);
           expect(request.body).not.toContain(grant);
         }
@@ -1368,7 +1533,7 @@ test.each([
   60_000,
 );
 
-test("Given Host version metadata, When testing a Go credential, Then the probe uses that deployment", async () => {
+test("Given Host version metadata, When testing a Go key without a model, Then the default inference probe uses that deployment", async () => {
   const { bindings } = await setupFixture({ vendorId: "opencode-go" });
   bindings.CF_VERSION_METADATA = { id: "go-host-probe", tag: "", timestamp: "" };
   const viewer = await getAccountViewer(bindings.DB, PUBLIC_API_TEST_IDS.ownerAccount as AccountId);
@@ -1379,10 +1544,11 @@ test("Given Host version metadata, When testing a Go credential, Then the probe 
   const result = await testVendorCredential(bindings, viewer, {
     projectId: PROJECT_ID,
     apiKey: "probe-key",
-    modelId: "deepseek-v4-flash",
     vendorId: "opencode-go",
   });
   expect(result.ok).toBe(true);
   expect(captured).toHaveLength(1);
+  expect(captured[0]?.method).toBe("POST");
+  expect(JSON.parse(captured[0]?.body ?? "{}")).toMatchObject({ model: "deepseek-v4.1-flash" });
   expect(captured[0]?.headers.get("user-agent")).toBe("mosoo/go-host-probe");
 });

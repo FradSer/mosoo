@@ -15,14 +15,14 @@ test("Given a Go subscription, When choosing a provider, Then Go stays distinct 
     apiKeyEnvVar: "OPENCODE_GO_API_KEY",
   });
   expect(getVendor("opencode")?.defaultApiBase).toBe("https://opencode.ai/zen/v1");
-  expect(getDefaultModelIdForVendor("opencode-go")).toBe("deepseek-v4-flash");
+  expect(getDefaultModelIdForVendor("opencode-go")).toBe("deepseek-v4.1-flash");
 });
 
 test.each(["acp-fallback", "pi"])(
   "Given Go models, When %s admits them, Then their official protocols are preserved",
   (runtimeId) => {
     for (const [modelId, modelProtocol] of [
-      ["deepseek-v4-flash", "openai-chat-completions"],
+      ["deepseek-v4.1-flash", "openai-chat-completions"],
       ["minimax-m2.7", "anthropic-messages"],
       ["gpt-5.6-luna", "openai-responses"],
     ]) {

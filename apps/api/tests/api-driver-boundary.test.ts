@@ -30,6 +30,7 @@ import {
 } from "../src/modules/runtime/infrastructure/runtime-boot-token";
 import { buildExecutionSpec } from "../src/modules/runtime/infrastructure/runtime-sandbox-provisioning/runtime-driver-execution-spec.builder";
 import type { RuntimeExecutionSpecBindings } from "../src/modules/runtime/infrastructure/runtime-sandbox-provisioning/runtime-driver-execution-spec.builder";
+import { ensureProvisioningDirectories } from "../src/modules/runtime/infrastructure/runtime-sandbox-provisioning/runtime-driver-files.service";
 import { createInitialSessionLiveState } from "../src/modules/sessions/application/session-live-state.service";
 import type { ApiBindings } from "../src/platform/cloudflare/worker-types";
 import {
@@ -55,6 +56,50 @@ const artifactPaths = {
 };
 
 describe("API to driver boundary", () => {
+  test.each(["acp-fallback", "pi"] as const)(
+    "keeps %s execution inside its Session without unsupported directory extensions",
+    async (runtimeId) => {
+      const profile = createDriverProfile();
+      const execution = await buildExecutionSpec(bindings, {
+        builtInTools: createDefaultAgentBuiltInTools(),
+        driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
+        profile: {
+          ...profile,
+          runtimeId,
+          model: "deepseek-v4.1-flash",
+          provider: "opencode-go",
+          vendorCredential: {
+            ...profile.vendorCredential,
+            vendorId: "opencode-go",
+          },
+        },
+        requestUrl: "https://api.example.com/api/driver/connect",
+        resolvedMcpServers: [],
+        resolvedSkillCatalog: [],
+        resolvedSkills: [],
+      });
+
+      expect(execution.session.additionalDirectories).toEqual([]);
+      expect(execution.session.cwd).toBe(profile.session.sessionOrganizationPath);
+      expect(execution.session.context.homePath).toBe(profile.session.homePath);
+
+      const commands: string[] = [];
+      await ensureProvisioningDirectories(
+        {
+          async exec(command) {
+            commands.push(command);
+            return { exitCode: 0, stderr: "", stdout: "", success: true };
+          },
+        },
+        { ...profile, runtimeId },
+      );
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toContain("/workspace/cache");
+      expect(commands[0]).toContain(profile.session.homePath);
+      expect(commands[0]).toContain(profile.session.sessionOrganizationPath);
+    },
+  );
+
   test.each(["cattle", "pet"] as const)(
     "requires a committed native checkpoint even when the boot input retains a historical %s label",
     async (kind) => {
@@ -66,7 +111,6 @@ describe("API to driver boundary", () => {
       };
       const execution = await buildExecutionSpec(bindings, {
         builtInTools: [],
-        driverGeneration: 0,
         driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
         nativeResumeRef: {
           kind: "openai_thread_id",
@@ -92,7 +136,6 @@ describe("API to driver boundary", () => {
         bootToken: "native-recovery-test",
         controlUrl: "https://api.example.com/api/driver/socket",
         driverControlPort: DRIVER_CONTROL_PORT_MIN,
-        driverGeneration: 0,
         driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
         execution,
         heartbeatIntervalMs: 1_000,
@@ -142,7 +185,6 @@ describe("API to driver boundary", () => {
         { enabled: true, name: "web_fetch" },
         { enabled: true, name: "web_search" },
       ],
-      driverGeneration: 7,
       driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
       nativeResumeRef: {
         kind: "openai_thread_id",
@@ -168,20 +210,19 @@ describe("API to driver boundary", () => {
     expect(execution.configRevision.runId).toBe(API_DRIVER_BOUNDARY_IDS.sessionRun);
     expect(execution.profilePrompt).toContain("You are a helpful runtime.");
     expect(execution.profilePrompt).toContain("`outputs/`");
-    const llmProxyGrant = execution.environment.variables["OPENAI_API_KEY"];
-    if (llmProxyGrant === undefined) {
-      throw new Error("Expected an LLM proxy grant env var.");
-    }
+    const llmProxyGrant = execution.modelConnection.proxyGrant;
 
     expect(execution.environment.variables).toEqual({
       EXISTING_ENV: "kept",
-      OPENAI_API_KEY: llmProxyGrant,
-      OPENAI_BASE_URL: `http://localhost:8787/api/driver/llm/proxy/${PLATFORM_ID_FIXTURES.vendorCredential}`,
+    });
+    expect(execution.modelConnection).toEqual({
+      protocol: "openai-responses",
+      proxyGrant: llmProxyGrant,
+      proxyUrl: `http://localhost:8787/api/driver/llm/proxy/${PLATFORM_ID_FIXTURES.vendorCredential}`,
     });
     await expect(verifyRuntimeActionToken(bindings, llmProxyGrant)).resolves.toMatchObject({
       action: "llm_proxy",
       projectId: API_DRIVER_BOUNDARY_IDS.project,
-      driverGeneration: 7,
       driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
       modelId: "gpt-5.5",
       modelProtocol: "openai-responses",
@@ -230,7 +271,6 @@ describe("API to driver boundary", () => {
   test("emits a boot payload that the driver protocol parser accepts", async () => {
     const execution = await buildExecutionSpec(bindings, {
       builtInTools: createDefaultAgentBuiltInTools(),
-      driverGeneration: 0,
       driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
       profile: createDriverProfile(),
       requestUrl: "https://api.example.com/api/driver/connect",
@@ -243,7 +283,6 @@ describe("API to driver boundary", () => {
       bootToken: "boot-token-1",
       controlUrl: "https://api.example.com/api/driver/socket",
       driverControlPort: DRIVER_CONTROL_PORT_MIN,
-      driverGeneration: 0,
       driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
       execution,
       heartbeatIntervalMs: 1_000,
@@ -263,7 +302,6 @@ describe("API to driver boundary", () => {
     });
     expect(parsed).toMatchObject({
       driverControlPort: DRIVER_CONTROL_PORT_MIN,
-      driverGeneration: 0,
       driverInstanceId: API_DRIVER_BOUNDARY_IDS.driverInstance,
       heartbeatIntervalMs: 1_000,
       protocolVersion: DRIVER_PROTOCOL_VERSION,
