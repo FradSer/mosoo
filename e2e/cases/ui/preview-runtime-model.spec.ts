@@ -56,7 +56,8 @@ for (const initial of [
       const preset = getPresetModel(identity);
       if (preset === null) throw new Error("Expected a preset model.");
       return {
-        ...identity,
+        modelId: identity.modelId,
+        vendorId: identity.vendorId,
         available: true,
         displayName: preset.displayName,
         modelProtocol: preset.protocol,

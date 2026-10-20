@@ -63,7 +63,7 @@ export async function configurePreviewRuntimeModel(
     await expect(modelField.getByRole("button")).toContainText(preset.displayName);
     return;
   }
-  const [response] = await Promise.all([
+  const [savedResponse] = await Promise.all([
     page.waitForResponse((response) => {
       if (!response.url().endsWith("/api/graphql")) return false;
       const request = response.request().postDataJSON() as {
@@ -79,8 +79,8 @@ export async function configurePreviewRuntimeModel(
     }),
     option.click(),
   ]);
-  expect(response.ok()).toBe(true);
-  expect(((await response.json()) as { errors?: unknown[] }).errors).toBeUndefined();
+  expect(savedResponse.ok()).toBe(true);
+  expect(((await savedResponse.json()) as { errors?: unknown[] }).errors).toBeUndefined();
   await page.reload();
   await expect(modelField.getByRole("button")).toContainText(preset.displayName);
 }
