@@ -4,6 +4,7 @@ import type { PresetModelProtocol } from "@mosoo/contracts/models";
 
 import {
   readVendorProbeBaseHost,
+  readVendorProbeErrorCode,
   toVendorProbeEndpointUrl,
   validateVendorProbeBaseUrl,
   vendorProbeModelListIncludes,
@@ -11,6 +12,21 @@ import {
 import { probeVendorCredential } from "../src/modules/vendor-credentials/application/vendor-credential-test";
 
 describe("vendor credential probe", () => {
+  test.each(["json", "text"] as const)(
+    "Given an echoed Go key, When reading a %s probe error, Then the key is redacted",
+    async (format) => {
+      const message = "Invalid API key oc_sk_test-secret_123; replace sk-legacy-secret";
+      const response =
+        format === "json"
+          ? Response.json({ error: { message } }, { status: 401 })
+          : new Response(message, { status: 401 });
+
+      expect(await readVendorProbeErrorCode(response)).toBe(
+        "http_401: Invalid API key oc_sk_***; replace sk-***",
+      );
+    },
+  );
+
   test("builds v1 endpoint URLs from vendor API bases", () => {
     expect(toVendorProbeEndpointUrl("https://api.example.com", "models")).toBe(
       "https://api.example.com/v1/models",

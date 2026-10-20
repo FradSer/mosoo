@@ -92,7 +92,7 @@ function sanitizeProviderErrorDetail(detail: string | null | undefined): string 
     ?.trim()
     .replaceAll(/\s+/gu, " ")
     .replaceAll(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer ***")
-    .replaceAll(/\b(sk|rk|pk)-[A-Za-z0-9_*.-]+/gu, "$1-***");
+    .replaceAll(/\b((?:sk|rk|pk)-|oc_sk_)[A-Za-z0-9_*.-]+/gu, "$1***");
 
   return normalized === undefined ? undefined : normalized.slice(0, 180);
 }

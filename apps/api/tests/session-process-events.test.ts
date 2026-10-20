@@ -254,7 +254,9 @@ describe("session process event projection", () => {
     const database = createProcessEventQueryDatabase();
     const snapshots = [
       { runId: "run-1", callId: null, tokens: 1916 },
+      { runId: "run-1", callId: "\t\n", tokens: 2000 },
       { runId: "run-1", callId: null, tokens: 3865 },
+      { runId: "run-1", callId: "\t second-call \u00a0", tokens: 5 },
       { runId: "run-1", callId: "second-call", tokens: 10 },
       { runId: "run-2", callId: null, tokens: 8 },
     ];
@@ -275,7 +277,7 @@ describe("session process event projection", () => {
       projectId: PROJECT_ID,
       sessionId: SESSION_ID,
     });
-    expect(events.map((event) => event.tokens)).toEqual([null, 3865, 10, 8]);
+    expect(events.map((event) => event.tokens)).toEqual([null, null, 3865, null, 10, 8]);
     expect(events.reduce((total, event) => total + (event.tokens ?? 0), 0)).toBe(3883);
   });
 

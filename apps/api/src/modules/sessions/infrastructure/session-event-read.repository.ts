@@ -160,10 +160,12 @@ export async function readSessionEventRowsAfterSeq(
       usage_key: sql<string | null>`CASE
         WHEN ${sessionEventsTable.eventType} = 'usage.updated'
           AND ${sessionEventsTable.canonicalEventJson} IS NOT NULL
-        THEN COALESCE(
-          'model_call:' || NULLIF(trim(json_extract(${sessionEventsTable.canonicalEventJson}, '$.payload.callId')), ''),
-          'run_usage'
-        ) END`,
+        THEN COALESCE(json_extract(${sessionEventsTable.canonicalEventJson}, '$.payload.callId'), '')
+        END`.mapWith((value: string) => {
+        // Match the ledger's JavaScript trim, including non-space whitespace.
+        const callId = value.trim();
+        return callId.length > 0 ? `model_call:${callId}` : "run_usage";
+      }),
     })
     .from(sessionEventsTable)
     .where(rangeConditions({ ...input, throughSeq }))
