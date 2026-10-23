@@ -8,7 +8,7 @@ The Playwright specs live in `e2e/cases`. Run them from the repository root with
 
 `deterministic/session-log.spec.ts` and every `ui` spec except `preview.spec.ts` need no provider keys or Worker bindings: they answer the console's GraphQL and auth-session requests with fixtures. Playwright reuses whatever already answers the base URL, `MOSOO_E2E_BASE_URL` or `http://127.0.0.1:$WEB_DEV_PORT` (port 5173) when it is unset, and otherwise starts only `@mosoo/web`. Screenshot specs write their review images under `.tmp/e2e/`.
 
-`ui/preview-runtime-model.spec.ts` verifies the persisted Agent identity after reload, including rejected provider/model/Agent mismatches. Run it with `just e2e e2e/cases/ui/preview-runtime-model.spec.ts`. PR Check type-checks the E2E package; it does not execute Playwright. This fixture run needs no provider credentials.
+`ui/preview-runtime-model.spec.ts` verifies the persisted Agent identity after reload, including rejected provider/model/Agent mismatches. Run it with `just e2e e2e/cases/ui/preview-runtime-model.spec.ts`. PR Check installs Chromium with `just e2e-browser-install` and executes this fixture suite after the repository check. This run needs no provider credentials and creates no model Session.
 
 ## Live specs
 
