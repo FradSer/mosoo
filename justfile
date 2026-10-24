@@ -133,6 +133,10 @@ public-api-smoke:
 e2e *args:
     e2e/node_modules/.bin/playwright test --config e2e/playwright.config.ts {{args}}
 
+# Install Chromium and its system dependencies for fixture browser checks.
+e2e-browser-install:
+    e2e/node_modules/.bin/playwright install --with-deps chromium
+
 # Update the Agent Driver submodule to upstream HEAD.
 driver-update:
     git submodule update --init --remote --checkout apps/driver
