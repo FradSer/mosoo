@@ -46,5 +46,11 @@ jobs:
       - name: Run repository check
         run: just check
 
+      - name: Install fixture browser
+        run: just e2e-browser-install
+
+      - name: Verify persisted Preview model selection
+        run: just e2e e2e/cases/ui/preview-runtime-model.spec.ts
+
       - name: Verify native Host checkpoint recovery
         run: just test-native-host-checkpoint
