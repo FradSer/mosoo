@@ -1,3 +1,4 @@
+import { getPresetModel } from "@mosoo/runtime-catalog";
 import { expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -12,7 +13,100 @@ export function getPreviewSmokeEmail(runId: string): string {
 }
 
 function getProviderLabelPattern(providerId: PreviewProviderId): RegExp {
-  return providerId === "anthropic" ? /\bAnthropic\b/iu : /\bOpenAI\b/iu;
+  return providerId === "anthropic"
+    ? /\bAnthropic\b/iu
+    : providerId === "gemini"
+      ? /\bGemini\b/iu
+      : /\bOpenAI\b/iu;
+}
+
+export async function configurePreviewRuntimeModel(
+  page: Page,
+  agentId: string,
+  input: { modelId: string; providerId: PreviewProviderId },
+): Promise<void> {
+  const preset = getPresetModel({ modelId: input.modelId, vendorId: input.providerId });
+  if (preset === null) throw new Error("Preview E2E requires an admitted preset model.");
+
+  const waitForAgentResponse = () =>
+    page
+      .waitForRequest((request) => {
+        if (!request.url().endsWith("/api/graphql")) return false;
+        const body = request.postDataJSON() as {
+          query?: string;
+          variables?: { agentId?: string };
+        };
+        return (
+          /\bquery\s+Agent\s*\(/u.test(body.query ?? "") && body.variables?.agentId === agentId
+        );
+      })
+      .then(async (request) => {
+        const response = await request.response();
+        if (response === null) throw new Error("Preview Agent request did not receive a response.");
+        return response;
+      });
+  const [loaded] = await Promise.all([
+    waitForAgentResponse(),
+    page.goto(`/agent/${agentId}?tab=preview`),
+  ]);
+  expect(loaded.ok()).toBe(true);
+  const initial = (await loaded.json()) as {
+    data?: { agent?: { id: string; model: string | null; provider: string | null } };
+    errors?: unknown[];
+  };
+  expect(initial.errors).toBeUndefined();
+  expect(initial.data?.agent).toMatchObject({ id: agentId });
+  const modelField = page.getByText("Model", { exact: true }).locator("..");
+  await modelField.getByRole("button").click();
+  const option = page.getByRole("menuitem").filter({
+    hasText: `${preset.vendorLabel} · ${preset.modelId}`,
+  });
+  await expect(option).toBeEnabled();
+  if (
+    initial.data?.agent?.model === input.modelId &&
+    initial.data.agent.provider === input.providerId
+  ) {
+    await page.keyboard.press("Escape");
+  } else {
+    const [savedResponse] = await Promise.all([
+      page.waitForResponse((response) => {
+        if (!response.url().endsWith("/api/graphql")) return false;
+        const request = response.request().postDataJSON() as {
+          query?: string;
+          variables?: { input?: { agentId?: string; model?: string; provider?: string } };
+        };
+        return (
+          request.query?.includes("UpdateAgentConfig") === true &&
+          request.variables?.input?.agentId === agentId &&
+          request.variables.input.model === input.modelId &&
+          request.variables.input.provider === input.providerId
+        );
+      }),
+      option.click(),
+    ]);
+    expect(savedResponse.ok()).toBe(true);
+    expect(((await savedResponse.json()) as { errors?: unknown[] }).errors).toBeUndefined();
+  }
+  // Watch requests from the new document so the mutation's refetch cannot
+  // satisfy the persistence check before navigation commits.
+  const [reloaded] = await Promise.all([
+    page
+      .waitForEvent("framenavigated", (frame) => frame === page.mainFrame())
+      .then(waitForAgentResponse),
+    page.reload(),
+  ]);
+  expect(reloaded.ok()).toBe(true);
+  const persisted = (await reloaded.json()) as typeof initial;
+  expect(persisted.errors).toBeUndefined();
+  expect(
+    persisted.data?.agent,
+    "Reloaded Preview Agent must retain id, provider, and model",
+  ).toMatchObject({
+    id: agentId,
+    model: input.modelId,
+    provider: input.providerId,
+  });
+  await expect(modelField.getByRole("button")).toContainText(preset.displayName);
 }
 
 export async function createPreviewRuntimeAgent(
