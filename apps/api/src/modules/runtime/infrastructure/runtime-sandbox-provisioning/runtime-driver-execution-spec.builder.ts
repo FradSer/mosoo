@@ -27,7 +27,7 @@ import type { DriverInstanceMcpGrantRecord } from "../driver-instance/mcp-grants
 import { createRuntimeActionToken } from "../runtime-boot-token";
 import type { RuntimeActionTokenBindings } from "../runtime-boot-token";
 import { buildModelConnection } from "./runtime-model-connection.builder";
-import { listAdditionalDirectories } from "./runtime-sandbox-provisioning.paths";
+import { listProvisioningDirectories } from "./runtime-sandbox-provisioning.paths";
 
 interface RuntimeActionUrlContext {
   bindings: RuntimeExecutionSpecBindings;
@@ -202,10 +202,12 @@ export async function buildExecutionSpec(
     provider: input.profile.provider,
     providerOptions: input.profile.providerOptions,
     session: {
+      // Host cache and native HOME are provisioned separately from optional
+      // directories advertised to the runtime CLI.
       additionalDirectories:
         input.profile.runtimeId === "acp-fallback" || input.profile.runtimeId === "pi"
           ? []
-          : listAdditionalDirectories(input.profile),
+          : listProvisioningDirectories(input.profile),
       context: {
         sandboxSessionId: input.profile.session.sandboxSessionId,
         homePath: input.profile.session.homePath,

@@ -1401,6 +1401,7 @@ describe("OpenCode Go subscription routing", () => {
               "content-type": "application/json",
               "user-agent": "generic-sdk/1.0",
               "x-opencode-session": "untrusted-session",
+              "x-opencode-custom-routing": "untrusted-route",
             },
             body: JSON.stringify({ model: modelId, stream: true, messages: [], input: "test" }),
           }),
@@ -1412,6 +1413,7 @@ describe("OpenCode Go subscription routing", () => {
         expect(upstream.headers.get("user-agent")).toBe(`mosoo/${bindings.CF_VERSION_METADATA.id}`);
         expect(upstream.headers.get("x-opencode-session")).toBe(PUBLIC_API_TEST_IDS.ownerSession);
         expect(upstream.headers.get("x-api-key")).toBeNull();
+        expect(upstream.headers.has("x-opencode-custom-routing")).toBe(false);
         expect(JSON.stringify([...upstream.headers])).not.toContain(grant);
       }
       await database
@@ -1442,11 +1444,7 @@ describe("OpenCode Go subscription routing", () => {
   );
 });
 
-test.each([
-  ["openai-chat-completions", "/chat/completions", "deepseek-v4.1-flash"],
-  ["anthropic-messages", "/messages", "minimax-m2.7"],
-  ["openai-responses", "/responses", "gpt-5.6-luna"],
-] as const)(
+test.each([["openai-chat-completions", "/chat/completions", "deepseek-v4.1-flash"]] as const)(
   "Given Go %s, When real OpenCode and Pi call a tool, Then the Host uses the Go wire contract",
   async (modelProtocol, path, modelId) => {
     const { bindings } = await setupFixture({ vendorId: "opencode-go" });
@@ -1511,10 +1509,7 @@ test.each([
           expect(upstreamUrl.origin + upstreamUrl.pathname).toBe(
             `https://opencode.ai/zen/go/v1${path}`,
           );
-          if (upstreamUrl.search) {
-            expect(modelProtocol).toBe("anthropic-messages");
-            expect(upstreamUrl.search).toBe("?beta=true");
-          }
+          expect(upstreamUrl.search).toBe("");
           expect(request.headers.get("authorization")).toBe(`Bearer ${UPSTREAM_API_KEY}`);
           expect(request.headers.get("x-api-key")).toBeNull();
           expect(request.headers.get("user-agent")).toBe(
@@ -1552,3 +1547,107 @@ test("Given Host version metadata, When testing a Go key without a model, Then t
   expect(JSON.parse(captured[0]?.body ?? "{}")).toMatchObject({ model: "deepseek-v4.1-flash" });
   expect(captured[0]?.headers.get("user-agent")).toBe("mosoo/go-host-probe");
 });
+
+test.each([401, 429, 500])(
+  "Go upstream %s errors do not expose the provider key",
+  async (status) => {
+    const { bindings } = await setupFixture({ vendorId: "opencode-go" });
+    captureUpstreamFetch(
+      () => new Response(`Rejected Bearer ${UPSTREAM_API_KEY}; oc_sk_echoed-secret`, { status }),
+    );
+    const grant = await createLlmProxyGrant(bindings, {
+      modelProtocol: "openai-chat-completions",
+      modelId: "deepseek-v4.1-flash",
+    });
+    const response = await dispatch(
+      bindings,
+      llmProxyRequest("/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${grant}` },
+        body: JSON.stringify({ model: "deepseek-v4.1-flash" }),
+      }),
+    );
+    expect(response.status).toBe(status);
+    const body = await response.text();
+    expect(body).not.toContain(UPSTREAM_API_KEY);
+    expect(body).not.toContain("oc_sk_echoed-secret");
+  },
+);
+
+test.each(["chunked", "oversized"] as const)(
+  "Go %s error responses are bounded and sanitized",
+  async (kind) => {
+    const { bindings } = await setupFixture({ vendorId: "opencode-go" });
+    captureUpstreamFetch(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const chunk of kind === "chunked"
+                ? ["sk-real-", "upstream-key"]
+                : ["x".repeat(65536), UPSTREAM_API_KEY])
+                controller.enqueue(new TextEncoder().encode(chunk));
+              controller.close();
+            },
+          }),
+          { status: 500 },
+        ),
+    );
+    const grant = await createLlmProxyGrant(bindings, {
+      modelProtocol: "openai-chat-completions",
+      modelId: "deepseek-v4.1-flash",
+    });
+    const response = await dispatch(
+      bindings,
+      llmProxyRequest("/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${grant}` },
+        body: JSON.stringify({ model: "deepseek-v4.1-flash" }),
+      }),
+    );
+    expect(response.status).toBe(500);
+    const body = await response.text();
+    expect(body).not.toContain(UPSTREAM_API_KEY);
+    if (kind === "oversized")
+      expect(body).toBe(JSON.stringify({ error: "Provider request failed." }));
+  },
+);
+
+test.each([304, 400])(
+  "Go %s errors redact headers and preserve bodyless responses",
+  async (status) => {
+    const { bindings } = await setupFixture({ vendorId: "opencode-go" });
+    captureUpstreamFetch(
+      () =>
+        new Response(status === 304 ? null : "failure", {
+          status,
+          headers: {
+            location: `https://example.com/${UPSTREAM_API_KEY}`,
+            "x-provider-error": UPSTREAM_API_KEY,
+            "content-encoding": "identity",
+            "content-md5": "old-digest",
+            etag: "old-etag",
+            digest: "old-digest",
+            "content-digest": "old-digest",
+          },
+        }),
+    );
+    const grant = await createLlmProxyGrant(bindings, {
+      modelProtocol: "openai-chat-completions",
+      modelId: "deepseek-v4.1-flash",
+    });
+    const response = await dispatch(
+      bindings,
+      llmProxyRequest("/chat/completions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${grant}` },
+        body: JSON.stringify({ model: "deepseek-v4.1-flash" }),
+      }),
+    );
+    expect(response.status).toBe(status);
+    expect(JSON.stringify([...response.headers])).not.toContain(UPSTREAM_API_KEY);
+    for (const header of ["content-encoding", "content-md5", "etag", "digest", "content-digest"])
+      expect(response.headers.has(header)).toBe(false);
+    if (status === 304) expect(response.body).toBeNull();
+  },
+);

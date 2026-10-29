@@ -345,6 +345,7 @@ test("Given a Go key, When testing a model, Then the probe identifies Mosoo and 
     const result = await probeVendorCredential({
       apiKey: "probe-key",
       modelId: "minimax-m2.7",
+      modelProtocol: "anthropic-messages",
       vendorId: "opencode-go",
       versionMetadata: { id: "go-probe-release" },
       verifyModelProtocol: true,
@@ -387,6 +388,21 @@ test.each([true, false])(
         max_tokens: 1,
       });
       if (!validKey) expect(result.errorCode).toStartWith("http_401");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+test.each([402, 429, 404])(
+  "Go probe preserves upstream HTTP %s instead of labeling it as a bad key",
+  async (status) => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ error: { message: "Unavailable" } }, { status });
+    try {
+      const result = await probeVendorCredential({ apiKey: "probe-key", vendorId: "opencode-go" });
+      expect(result.ok).toBe(false);
+      expect(result.errorCode).toStartWith(`http_${status}`);
     } finally {
       globalThis.fetch = originalFetch;
     }

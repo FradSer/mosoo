@@ -2,6 +2,7 @@ import type { PresetModelProtocol } from "@mosoo/contracts/models";
 import type { RuntimeCatalogVendor } from "@mosoo/runtime-catalog";
 
 import { getWorkerUserAgent } from "../../../platform/cloudflare/worker-user-agent";
+import { redactProviderCredentials } from "../../../shared/provider-error";
 import type { ProviderFetchProxyConfig } from "./provider-fetch-proxy";
 import { fetchViaProviderProxy } from "./provider-fetch-proxy";
 
@@ -88,11 +89,10 @@ function toVendorProbeErrorCode(status: number, detail?: string | null): string 
 }
 
 function sanitizeProviderErrorDetail(detail: string | null | undefined): string | undefined {
-  const normalized = detail
-    ?.trim()
-    .replaceAll(/\s+/gu, " ")
-    .replaceAll(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer ***")
-    .replaceAll(/\b((?:sk|rk|pk)-|oc_sk_)[A-Za-z0-9_*.-]+/gu, "$1***");
+  const normalized =
+    detail === null || detail === undefined
+      ? undefined
+      : redactProviderCredentials(detail.trim().replaceAll(/\s+/gu, " "));
 
   return normalized === undefined ? undefined : normalized.slice(0, 180);
 }

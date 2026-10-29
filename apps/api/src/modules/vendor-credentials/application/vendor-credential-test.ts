@@ -301,7 +301,7 @@ export async function probeVendorCredential(
     });
   }
 
-  if (modelIdRequired && modelId === null) {
+  if ((modelIdRequired || requiresInferenceProbe) && modelId === null) {
     return finishCredentialTest({
       baseUrl,
       errorCode: "missing_model_id",

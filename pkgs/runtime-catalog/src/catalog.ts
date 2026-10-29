@@ -444,30 +444,6 @@ export const PRESET_MODELS: readonly RuntimeCatalogPresetModel[] = [
     protocol: "openai-chat-completions",
     vendor: VENDOR_OPENCODE_GO,
   },
-  {
-    displayName: "MiniMax M3",
-    modelId: "minimax-m3",
-    protocol: "anthropic-messages",
-    vendor: VENDOR_OPENCODE_GO,
-  },
-  {
-    displayName: "MiniMax M2.7",
-    modelId: "minimax-m2.7",
-    protocol: "anthropic-messages",
-    vendor: VENDOR_OPENCODE_GO,
-  },
-  {
-    displayName: "Qwen3.7 Plus",
-    modelId: "qwen3.7-plus",
-    protocol: "anthropic-messages",
-    vendor: VENDOR_OPENCODE_GO,
-  },
-  {
-    displayName: "GPT 5.6 Luna",
-    modelId: "gpt-5.6-luna",
-    protocol: "openai-responses",
-    vendor: VENDOR_OPENCODE_GO,
-  },
 ];
 
 const ALL_MODEL_PROTOCOLS: readonly PresetModelProtocol[] = [

@@ -5,6 +5,7 @@ import {
   getDefaultModelIdForVendor,
   getVendor,
   resolveRuntimeModelProtocol,
+  getPresetModel,
 } from "@mosoo/runtime-catalog";
 
 test("Given a Go subscription, When choosing a provider, Then Go stays distinct from Zen", () => {
@@ -23,8 +24,8 @@ test.each(["acp-fallback", "pi"])(
   (runtimeId) => {
     for (const [modelId, modelProtocol] of [
       ["deepseek-v4.1-flash", "openai-chat-completions"],
-      ["minimax-m2.7", "anthropic-messages"],
-      ["gpt-5.6-luna", "openai-responses"],
+      ["deepseek-v4-pro", "openai-chat-completions"],
+      ["kimi-k2.6", "openai-chat-completions"],
     ]) {
       expect(
         resolveRuntimeModelProtocol({ runtimeId, vendorId: "opencode-go", modelId: modelId }),
@@ -39,3 +40,9 @@ test.each(["acp-fallback", "pi"])(
     ).toMatchObject({ ok: false, code: "model-unknown" });
   },
 );
+
+test("Go only admits Chat Completions presets until other protocols have real acceptance", () => {
+  for (const modelId of ["minimax-m3", "minimax-m2.7", "qwen3.7-plus", "gpt-5.6-luna"]) {
+    expect(getPresetModel({ vendorId: "opencode-go", modelId })).toBeNull();
+  }
+});
