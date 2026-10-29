@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { PRESET_MODEL_CATALOG } from "@mosoo/runtime-catalog";
 
-import { selectModelsDevPrices } from "../bin/refresh-models-dev";
+import { presetPriceChanges, selectModelsDevPrices } from "../bin/refresh-models-dev";
 import {
   calculateUsageCost,
   createModelsDevPricingCatalog,
@@ -72,37 +72,58 @@ describe("cost pricing", () => {
     expect(findModelPricing({ providerId: "opencode-go", modelId: "deepseek-v4-pro" })).toBeNull();
   });
 
+  // Reviewed prices-only snapshot, USD per million tokens. Pin every preset.
   test.each([
-    ["anthropic", "claude-sonnet-5", 2, 10],
-    ["anthropic", "claude-opus-4-5", 5, 25],
-    ["anthropic", "claude-opus-4-6", 5, 25],
-    ["anthropic", "claude-opus-4-7", 5, 25],
-    ["anthropic", "claude-haiku-4-5", 1, 5],
-    ["deepseek", "deepseek-v4-pro", 0.66, 1.98],
-    ["deepseek", "deepseek-v4-flash", 0.15, 0.6],
-    ["gemini", "gemini-3.5-flash", 1.5, 9],
-    ["opencode", "gemini-3.5-flash", 1.5, 9],
-  ] as const)("uses models.dev rates for %s/%s", (providerId, modelId, input, output) => {
-    expect(findModelPricing({ providerId, modelId })).toMatchObject({
-      inputUsdPerMillion: input,
-      outputUsdPerMillion: output,
-      source: "https://models.dev/api.json",
-    });
-  });
+    ["anthropic", "claude-fable-5", 10, 50, 1, 12.5],
+    ["anthropic", "claude-sonnet-5", 2, 10, 0.2, 2.5],
+    ["anthropic", "claude-opus-4-7", 5, 25, 0.5, 6.25],
+    ["anthropic", "claude-opus-4-6", 5, 25, 0.5, 6.25],
+    ["anthropic", "claude-opus-4-5", 5, 25, 0.5, 6.25],
+    ["anthropic", "claude-sonnet-4-6", 3, 15, 0.3, 3.75],
+    ["anthropic", "claude-sonnet-4-5", 3, 15, 0.3, 3.75],
+    ["anthropic", "claude-haiku-4-5", 1, 5, 0.1, 1.25],
+    ["openai", "gpt-5.6-sol", 4, 20, 0.4, 5],
+    ["openai", "gpt-5.6-terra", 2, 12, 0.2, 2.5],
+    ["openai", "gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+    ["openai", "gpt-5.5", 5, 30, 0.5, 5],
+    ["openai", "gpt-5.4", 2.5, 15, 0.25, 2.5],
+    ["openai", "gpt-5.4-mini", 0.75, 4.5, 0.075, 0.75],
+    ["openai", "gpt-5.3", 1.75, 14, 0.175, 1.75],
+    ["openai", "gpt-5.2", 1.75, 14, 0.175, 1.75],
+    ["deepseek", "deepseek-v4-pro", 0.66, 1.98, 0.022, 0.66],
+    ["deepseek", "deepseek-v4-flash", 0.15, 0.6, 0.003, 0.15],
+    ["gemini", "gemini-3.5-flash", 1.5, 9, 0.15, 1.5],
+    ["qwen", "qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
+    ["qwen", "qwen3.6-plus", 0.5, 3, 0.05, 0.625],
+    ["kimi", "kimi-k2.6", 0.95, 4, 0.16, 0.95],
+    ["kimi", "kimi-k2.7-code", 0.95, 4, 0.19, 0.95],
+    ["zhipu", "glm-4.7", 0.6, 2.2, 0.11, 0],
+    ["zhipu", "glm-4.6", 0.6, 2.2, 0.11, 0],
+    ["minimax", "MiniMax-M3", 0.3, 1.2, 0.06, 0.3],
+    ["minimax", "MiniMax-M2.7", 0.3, 1.2, 0.06, 0.375],
+    ["opencode", "deepseek-v4-pro", 1.74, 3.48, 0.145, 1.74],
+    ["opencode", "qwen3.6-plus", 0.5, 3, 0.05, 0.625],
+    ["opencode", "glm-5.2", 1.4, 4.4, 0.26, 1.4],
+    ["opencode", "minimax-m2.7", 0.3, 1.2, 0.06, 0.3],
+    ["opencode", "gemini-3.5-flash", 1.5, 9, 0.15, 1.5],
+  ] as const)(
+    "pins rates for %s/%s",
+    (providerId, modelId, input, output, cacheRead, cacheWrite) => {
+      expect(findModelPricing({ providerId, modelId })).toMatchObject({
+        inputUsdPerMillion: input,
+        outputUsdPerMillion: output,
+        cacheReadUsdPerMillion: cacheRead,
+        cacheWriteUsdPerMillion: cacheWrite,
+      });
+    },
+  );
 
   test("layers reviewed overrides on the same normalized lookup", () => {
-    const catalog = createModelsDevPricingCatalog({
-      openai: { "gpt-5.3": { input: 99, output: 99 } },
-    });
-    expect(
-      catalog.findModelPricing({ providerId: "openai", modelId: "openai/gpt-5.3-latest" }),
-    ).toMatchObject({
-      cacheReadUsdPerMillion: 0.175,
-      cacheWriteUsdPerMillion: 1.75,
-      inputUsdPerMillion: 1.75,
-      outputUsdPerMillion: 14,
-      source: "mosoo_override",
-    });
+    expect(() =>
+      createModelsDevPricingCatalog({
+        openai: { "gpt-5.3": { input: 99, output: 99 } },
+      }),
+    ).toThrow("override now exists in models.dev");
     expect(findModelPricing({ providerId: "openai", modelId: "gpt-5.3" })).toMatchObject({
       inputUsdPerMillion: 1.75,
     });
@@ -365,5 +386,33 @@ describe("cost pricing", () => {
     });
     expect(selected["opencode-go"]).toBeUndefined();
     expect(() => selectModelsDevPrices({})).toThrow("provider is missing");
+  });
+  test("rejects malformed refresh rows and sorts model and tier keys", () => {
+    const providers = (cost: unknown) =>
+      Object.fromEntries(
+        Object.values(MODELS_DEV_PROVIDER_IDS).map((id) => [
+          id,
+          { models: { z: { cost }, a: { cost } } },
+        ]),
+      );
+    for (const cost of [
+      { input: -1, output: 2 },
+      { input: 1 },
+      { input: "1", output: 2 },
+      { input: Infinity, output: 2 },
+      { input: 1001, output: 2 },
+      { input: 1, output: 2, tiers: {} },
+    ]) {
+      expect(() => selectModelsDevPrices(providers(cost))).toThrow("Invalid models.dev");
+    }
+    expect(
+      Object.keys(selectModelsDevPrices(providers({ input: 0, output: 2 })).openai ?? {}),
+    ).toEqual(["a", "z"]);
+    expect(
+      presetPriceChanges(
+        { anthropic: { "claude-sonnet-5": { input: 3, output: 15 } } },
+        { anthropic: { "claude-sonnet-5": { input: 0.000002, output: 0.00001 } } },
+      ).find((line) => line.includes("anthropic/claude-sonnet-5")),
+    ).toContain("REVIEW >=50%");
   });
 });

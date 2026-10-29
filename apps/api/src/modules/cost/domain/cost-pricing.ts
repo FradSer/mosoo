@@ -34,6 +34,7 @@ export interface ModelPricingLookup {
 }
 
 export interface UsageCostInput {
+  contextTiersAvailable?: boolean;
   cacheCreationTokens: number;
   cacheReadTokens: number;
   inputTokens: number;
@@ -142,6 +143,9 @@ export function createModelsDevPricingCatalog(snapshot: ModelsDevPrices): Models
   ] as const) {
     for (const [provider, models] of Object.entries(data)) {
       for (const [model, cost] of Object.entries(models)) {
+        if (source === "mosoo_override" && entries.has(`${provider}:${normalizeModelId(model)}`)) {
+          throw new Error(`Pricing override now exists in models.dev: ${provider}/${model}`);
+        }
         const pricing = modelPricing(provider, model, cost, source);
         if (pricing !== null) entries.set(`${provider}:${normalizeModelId(model)}`, pricing);
       }
@@ -197,9 +201,8 @@ function calculateUsageCostWithLookup(
 
   // Normalized input includes cache reads; cache writes are a separate bucket.
   const contextTokens = input.inputTokens + input.cacheCreationTokens;
-  const tier = pricing.contextTiers.findLast(
-    ({ thresholdTokens }) => contextTokens > thresholdTokens,
-  );
+  const contextTiers = input.contextTiersAvailable === false ? [] : pricing.contextTiers;
+  const tier = contextTiers.findLast(({ thresholdTokens }) => contextTokens > thresholdTokens);
   const rates = tier ?? pricing;
   const billableInputTokens = Math.max(0, input.inputTokens - input.cacheReadTokens);
   // Output already includes reasoning. Audio has no separate usage counter.
@@ -211,6 +214,13 @@ function calculateUsageCostWithLookup(
     1_000_000;
   return {
     priceSnapshotJson: JSON.stringify({
+      baseRates: {
+        cacheReadUsdPerMillion: pricing.cacheReadUsdPerMillion,
+        cacheWriteUsdPerMillion: pricing.cacheWriteUsdPerMillion,
+        inputUsdPerMillion: pricing.inputUsdPerMillion,
+        outputUsdPerMillion: pricing.outputUsdPerMillion,
+      },
+      contextTiers,
       billableInputTokens,
       cacheReadUsdPerMillion: rates.cacheReadUsdPerMillion,
       cacheWriteUsdPerMillion: rates.cacheWriteUsdPerMillion,
